@@ -7,7 +7,7 @@ schedules:
   displayName: Daily Language Practice Schedule
   branches:
     include:
-    - main
+    - main # Ou a branch principal do seu repositório de infra
   always: true
   timezone: 'America/Sao_Paulo' # Garante que o cron job respeite seu fuso horário
 
@@ -18,10 +18,7 @@ variables:
 - group: Telegram-Credentials # Vincula o grupo de variáveis com seu token e chat ID
 
 steps:
-- checkout: self
-  repository: Rahgomes/rah-automations-scripts # Seu novo repositório de scripts
-  ref: main
-  name: CheckoutScripts
+- checkout: Rahgomes/rah-automations-scripts@main # Repositório e branch para checkout
   displayName: 'Checkout Automation Scripts'
 
 - script: |
