@@ -1,0 +1,42 @@
+name: Daily Language Practice - $(Date:yyyyMMdd)$(Rev:r)
+
+trigger: none # Nao dispara em push
+
+schedules:
+- cron: "0 9 * * *" # Diariamente às 9:00 AM no fuso horário do Ramon (America/Sao_Paulo)
+  displayName: Daily Language Practice Schedule
+  branches:
+    include:
+    - main
+  always: true
+  timezone: 'America/Sao_Paulo' # Garante que o cron job respeite seu fuso horário
+
+pool:
+  vmImage: 'ubuntu-latest' # Agente hospedado pela Azure
+
+variables:
+- group: Telegram-Credentials # Vincula o grupo de variáveis com seu token e chat ID
+
+steps:
+- checkout: self
+  repository: Rahgomes/rah-automations-scripts # Seu novo repositório de scripts
+  ref: main
+  name: CheckoutScripts
+  displayName: 'Checkout Automation Scripts'
+
+- script: |
+    python3 scripts/daily_language_practice.py > language_practice_message.txt
+  displayName: 'Generate Language Practice Message'
+  name: GenerateMessage
+
+- script: |
+    MESSAGE=$(cat language_practice_message.txt)
+    # Escapa caracteres especiais para URL
+    ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed 's/&/%26/g; s/ /%20/g; s/#/%23/g; s/\"/%22/g; s/\'\'\'/%27%27%27/g; s/\n/%0A/g')
+
+    curl -s -X POST "https://api.telegram.org/bot$(TELEGRAM_BOT_TOKEN)/sendMessage" \
+      -d "chat_id=$(TELEGRAM_CHAT_ID)" \
+      -d "text=$ESCAPED_MESSAGE" \
+      -d "parse_mode=Markdown"
+  displayName: 'Send Language Practice Message to Telegram'
+  name: SendToTelegram
