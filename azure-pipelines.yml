@@ -1,24 +1,23 @@
 name: Daily Language Practice - $(Date:yyyyMMdd)$(Rev:r)
 
-trigger: none # Nao dispara em push
+trigger: none
 
 schedules:
-- cron: "0 9 * * *" # Diariamente às 9:00 AM no fuso horário do Ramon (America/Sao_Paulo)
-  displayName: Daily Language Practice Schedule
+- cron: "0 12 * * *" # Diariamente às 12:00 PM UTC (equivalente a 9:00 AM America/Sao_Paulo)
+  displayName: Daily Language Practice Schedule (9:00 AM BRT)
   branches:
     include:
-    - main # Ou a branch principal do seu repositório de infra
+    - main
   always: true
-  timezone: 'America/Sao_Paulo' # Garante que o cron job respeite seu fuso horário
 
 pool:
-  vmImage: 'ubuntu-latest' # Agente hospedado pela Azure
+  vmImage: 'ubuntu-latest'
 
 variables:
-- group: Telegram-Credentials # Vincula o grupo de variáveis com seu token e chat ID
+- group: Telegram-Credentials
 
 steps:
-- checkout: Rahgomes/rah-automations-scripts@main # Repositório e branch para checkout
+- checkout: Rahgomes/rah-automations-scripts@main
   displayName: 'Checkout Automation Scripts'
 
 - script: |
@@ -29,7 +28,7 @@ steps:
 - script: |
     MESSAGE=$(cat language_practice_message.txt)
     # Escapa caracteres especiais para URL
-    ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed 's/&/%26/g; s/ /%20/g; s/#/%23/g; s/\"/%22/g; s/\'\'\'/%27%27%27/g; s/\n/%0A/g')
+    ESCAPED_MESSAGE=$(echo "$MESSAGE" | sed 's/&/%26/g; s/ /%20/g; s/#/%23/g; s/\"/%22/g; s/'"'"'/%27%27%27/g; s/\n/%0A/g')
 
     curl -s -X POST "https://api.telegram.org/bot$(TELEGRAM_BOT_TOKEN)/sendMessage" \
       -d "chat_id=$(TELEGRAM_CHAT_ID)" \
