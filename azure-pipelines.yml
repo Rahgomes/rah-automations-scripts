@@ -17,7 +17,7 @@ variables:
 - group: Telegram-Credentials
 
 steps:
-- checkout: Rahgomes/rah-automations-scripts@main
+- checkout: self
   displayName: 'Checkout Automation Scripts'
 
 - script: |
