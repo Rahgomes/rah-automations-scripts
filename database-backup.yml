@@ -1,0 +1,42 @@
+name: Database Backup - $(Date:yyyyMMdd)$(Rev:r)
+
+trigger: none
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - group: Telegram-Rah-Automation-Notifier-Credentials
+  - group: Database-Backup-Credentials
+
+steps:
+  - checkout: self
+    displayName: "Checkout Automation Scripts"
+
+  - script: |
+      sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+      wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+      sudo apt-get update
+      sudo apt-get install -y postgresql-client-16
+    displayName: "Install postgresql-client-16"
+
+  - script: |
+      pip install -r requirements.txt
+    displayName: "Install Python Dependencies"
+
+  - script: |
+      python3 -m scripts.database_backup.main
+    displayName: "Run Database Backup"
+    env:
+      TELEGRAM_BOT_TOKEN: $(TELEGRAM_BOT_TOKEN)
+      TELEGRAM_CHAT_ID: $(TELEGRAM_CHAT_ID)
+      PGHOST: $(PGHOST)
+      PGPORT: $(PGPORT)
+      PGUSER: $(PGUSER)
+      PGPASSWORD: $(PGPASSWORD)
+      PGDATABASES: $(PGDATABASES)
+      MINIO_ENDPOINT: $(MINIO_ENDPOINT)
+      MINIO_ACCESS_KEY: $(MINIO_ACCESS_KEY)
+      MINIO_SECRET_KEY: $(MINIO_SECRET_KEY)
+      MINIO_BUCKET: $(MINIO_BUCKET)
+      MINIO_REGION: $(MINIO_REGION)

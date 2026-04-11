@@ -1,73 +1,13 @@
 import logging
-import os
 import time
 
-import requests
+from scripts.shared import telegram
 
 from . import config
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/{method}"
 MESSAGE_DELAY = 0.5  # seconds between messages
-
-
-def _get_credentials() -> tuple[str, str]:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    return token, chat_id
-
-
-def _api_url(method: str) -> str:
-    token, _ = _get_credentials()
-    return TELEGRAM_API_URL.format(token=token, method=method)
-
-
-def send_text_message(text: str) -> bool:
-    """Send a text message to Telegram using HTML parse mode."""
-    _, chat_id = _get_credentials()
-    try:
-        response = requests.post(
-            _api_url("sendMessage"),
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-            },
-            timeout=30,
-        )
-        if response.ok:
-            logger.info("Text message sent successfully")
-            return True
-        logger.error("Telegram sendMessage failed: %s", response.text)
-        return False
-    except Exception as e:
-        logger.error("Error sending text message: %s", e)
-        return False
-
-
-def send_voice_message(audio_bytes: bytes, caption: str | None = None) -> bool:
-    """Send an audio voice message to Telegram."""
-    _, chat_id = _get_credentials()
-    try:
-        data = {"chat_id": chat_id}
-        if caption:
-            data["caption"] = caption
-        files = {"voice": ("audio.ogg", audio_bytes, "audio/ogg")}
-        response = requests.post(
-            _api_url("sendVoice"),
-            data=data,
-            files=files,
-            timeout=60,
-        )
-        if response.ok:
-            logger.info("Voice message sent successfully")
-            return True
-        logger.error("Telegram sendVoice failed: %s", response.text)
-        return False
-    except Exception as e:
-        logger.error("Error sending voice message: %s", e)
-        return False
 
 
 def format_header(theme: str) -> str:
@@ -132,7 +72,7 @@ def send_daily_practice(
     Sends a header, then for each language: text message + voice message.
     """
     header = format_header(theme)
-    success = send_text_message(header)
+    success = telegram.send_text_message(header)
     time.sleep(MESSAGE_DELAY)
 
     for i, lang in enumerate(config.LANGUAGES):
@@ -140,12 +80,12 @@ def send_daily_practice(
         audio = audios[i] if i < len(audios) else None
 
         text = format_language_message(content, lang)
-        send_text_message(text)
+        telegram.send_text_message(text)
         time.sleep(MESSAGE_DELAY)
 
         if audio:
             caption = f"🔊 {lang['flag']} Áudio — {content.get('term', '')}"
-            send_voice_message(audio, caption)
+            telegram.send_voice_message(audio, caption)
             time.sleep(MESSAGE_DELAY)
 
     logger.info("Daily practice delivery completed")
