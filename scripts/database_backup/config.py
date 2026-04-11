@@ -1,5 +1,8 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+DEFAULT_SYSTEM_DATABASES = frozenset({"postgres", "template0", "template1"})
 
 
 @dataclass(frozen=True)
@@ -8,7 +11,8 @@ class PostgresConfig:
     port: str
     user: str
     password: str
-    databases: list[str]
+    explicit_databases: list[str] = field(default_factory=list)
+    excluded_databases: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -33,21 +37,32 @@ def _require(name: str) -> str:
     return value
 
 
-def _parse_databases(raw: str) -> list[str]:
-    databases = [db.strip() for db in raw.split(",") if db.strip()]
-    if not databases:
-        raise RuntimeError("PGDATABASES must contain at least one database name")
-    return databases
+def _parse_csv(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def load() -> BackupConfig:
-    """Load and validate backup configuration from environment variables."""
+    """Load and validate backup configuration from environment variables.
+
+    PGDATABASES is optional: when empty, the script auto-discovers databases
+    by querying pg_database at runtime. PGDATABASES_EXCLUDE accepts a CSV of
+    database names to skip during auto-discovery (system databases are
+    always excluded).
+    """
+    explicit = _parse_csv(os.environ.get("PGDATABASES"))
+    excluded = frozenset(
+        _parse_csv(os.environ.get("PGDATABASES_EXCLUDE"))
+    ) | DEFAULT_SYSTEM_DATABASES
+
     postgres = PostgresConfig(
         host=_require("PGHOST"),
         port=os.environ.get("PGPORT", "5432"),
         user=_require("PGUSER"),
         password=_require("PGPASSWORD"),
-        databases=_parse_databases(_require("PGDATABASES")),
+        explicit_databases=explicit,
+        excluded_databases=excluded,
     )
     storage = StorageConfig(
         endpoint=_require("MINIO_ENDPOINT"),

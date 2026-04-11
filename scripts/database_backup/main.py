@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, postgres_dumper, storage_uploader
+from . import config, database_discovery, drift_detector, postgres_dumper, storage_uploader
 from .notifier import BackupResult, notify_start, notify_summary
 
 logging.basicConfig(
@@ -60,10 +60,21 @@ def main() -> int:
         logger.error("Configuration error: %s", e)
         return 1
 
-    databases = cfg.postgres.databases
+    try:
+        databases = database_discovery.resolve_databases(cfg.postgres)
+    except RuntimeError as e:
+        logger.error("Failed to resolve database list: %s", e)
+        return 1
+
+    if not databases:
+        logger.error("No databases to back up after filtering")
+        return 1
+
     logger.info("Will back up %d database(s): %s", len(databases), ", ".join(databases))
 
-    notify_start(databases)
+    orphaned = drift_detector.find_orphaned_prefixes(cfg.storage, databases)
+
+    notify_start(databases, orphaned)
 
     timestamp = datetime.now(timezone.utc)
     results = [
@@ -71,7 +82,7 @@ def main() -> int:
         for db in databases
     ]
 
-    notify_summary(results)
+    notify_summary(results, orphaned)
 
     all_ok = all(r.success for r in results)
     logger.info("Backup run completed (success=%s)", all_ok)
