@@ -31,7 +31,7 @@ def _format_duration(seconds: float) -> str:
     return f"{int(minutes)}m {int(sec)}s"
 
 
-def notify_start(databases: list[str]) -> None:
+def notify_start(databases: list[str], orphaned: list[str] | None = None) -> None:
     count = len(databases)
     plural = "s" if count > 1 else ""
     db_list = "\n".join(f"• <code>{db}</code>" for db in databases)
@@ -40,10 +40,20 @@ def notify_start(databases: list[str]) -> None:
         f"{count} banco{plural} na fila:\n"
         f"{db_list}"
     )
+    if orphaned:
+        orphan_list = "\n".join(f"• <code>{db}</code>" for db in orphaned)
+        message += (
+            f"\n\n⚠️ <b>Drift detectado</b> — prefixos no bucket sem banco correspondente:\n"
+            f"{orphan_list}\n"
+            f"<i>Considere remover os backups antigos manualmente.</i>"
+        )
     telegram.send_text_message(message)
 
 
-def notify_summary(results: list[BackupResult]) -> None:
+def notify_summary(
+    results: list[BackupResult],
+    orphaned: list[str] | None = None,
+) -> None:
     total = len(results)
     successes = [r for r in results if r.success]
     failures = [r for r in results if not r.success]
@@ -72,5 +82,11 @@ def notify_summary(results: list[BackupResult]) -> None:
             )
         else:
             lines.append(f"❌ <code>{r.database}</code> — {r.error}")
+
+    if orphaned:
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"⚠️ <b>{len(orphaned)} prefixo(s) órfão(s) no bucket:</b>")
+        for db in orphaned:
+            lines.append(f"• <code>{db}</code>")
 
     telegram.send_text_message("\n".join(lines))

@@ -1,9 +1,18 @@
 name: Database Backup - $(Date:yyyyMMdd)$(Rev:r)
 
 trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: "Daily 03:00 America/Sao_Paulo (06:00 UTC)"
+    branches:
+      include:
+        - main
+    always: true
 
 pool:
-  vmImage: "ubuntu-latest"
+  name: rah-self-hosted
 
 variables:
   - group: Telegram-Rah-Automation-Notifier-Credentials
@@ -11,22 +20,36 @@ variables:
 
 steps:
   - checkout: self
-    displayName: "Checkout Automation Scripts"
+    displayName: "Checkout automation scripts"
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.12"
+      addToPath: true
+    displayName: "Use Python 3.12"
 
   - script: |
-      sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-      wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-      sudo apt-get update
-      sudo apt-get install -y postgresql-client-16
-    displayName: "Install postgresql-client-16"
+      set -euo pipefail
+      if ! command -v pg_dump >/dev/null 2>&1; then
+        echo "pg_dump not found on agent — installing postgresql-client-16"
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+        sudo apt-get install -y postgresql-client-16
+      fi
+      pg_dump --version
+      psql --version
+    displayName: "Ensure postgresql-client-16 is available"
 
   - script: |
-      pip install -r requirements.txt
-    displayName: "Install Python Dependencies"
+      set -euo pipefail
+      python3 -m pip install --upgrade pip
+      python3 -m pip install -r requirements.txt
+    displayName: "Install Python dependencies"
 
   - script: |
       python3 -m scripts.database_backup.main
-    displayName: "Run Database Backup"
+    displayName: "Run database backup"
     env:
       TELEGRAM_BOT_TOKEN: $(TELEGRAM_BOT_TOKEN)
       TELEGRAM_CHAT_ID: $(TELEGRAM_CHAT_ID)
@@ -35,6 +58,7 @@ steps:
       PGUSER: $(PGUSER)
       PGPASSWORD: $(PGPASSWORD)
       PGDATABASES: $(PGDATABASES)
+      PGDATABASES_EXCLUDE: $(PGDATABASES_EXCLUDE)
       MINIO_ENDPOINT: $(MINIO_ENDPOINT)
       MINIO_ACCESS_KEY: $(MINIO_ACCESS_KEY)
       MINIO_SECRET_KEY: $(MINIO_SECRET_KEY)
