@@ -41,11 +41,14 @@ steps:
 
   - script: |
       set -euo pipefail
-      python3 -m pip install --upgrade pip
-      python3 -m pip install -r requirements.txt
+      python3 -m venv .venv
+      source .venv/bin/activate
+      pip install --upgrade pip
+      pip install -r requirements.txt
     displayName: "Install Python dependencies"
 
   - script: |
+      source .venv/bin/activate
       python3 -m scripts.database_backup.main
     displayName: "Run database backup"
     env:
