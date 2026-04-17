@@ -1,0 +1,48 @@
+name: Infra Report - $(Date:yyyyMMdd)$(Rev:r)
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 7 * * *"
+    displayName: "Daily 04:00 America/Sao_Paulo (07:00 UTC)"
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: rah-self-hosted
+
+variables:
+  - group: Telegram-Rah-Automation-Notifier-Credentials
+  - group: Database-Backup-Credentials
+
+steps:
+  - checkout: self
+    displayName: "Checkout automation scripts"
+
+  - script: |
+      python3 --version
+    displayName: "Verify Python version"
+
+  - script: |
+      set -euo pipefail
+      python3 -m venv .venv
+      source .venv/bin/activate
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    displayName: "Install Python dependencies"
+
+  - script: |
+      source .venv/bin/activate
+      python3 -m scripts.infra_report.main
+    displayName: "Run infra report"
+    env:
+      TELEGRAM_BOT_TOKEN: $(TELEGRAM_BOT_TOKEN)
+      TELEGRAM_CHAT_ID: $(TELEGRAM_CHAT_ID)
+      MINIO_ENDPOINT: $(MINIO_ENDPOINT)
+      MINIO_ACCESS_KEY: $(MINIO_ACCESS_KEY)
+      MINIO_SECRET_KEY: $(MINIO_SECRET_KEY)
+      MINIO_BUCKET: $(MINIO_BUCKET)
+      MINIO_REGION: $(MINIO_REGION)

@@ -8,6 +8,7 @@ Colecao de scripts de automacao para o servidor srv986128. Cada script eh um mod
 |---|---|---|---|
 | [Healthcheck](scripts/healthcheck/README.md) | Watchdog de 13 servicos com auto-recovery e alertas Telegram | A cada 2 min | Cron no servidor |
 | [Database Backup](scripts/database_backup/README.md) | Backup PostgreSQL para MinIO com drift detection | Diario 3h BRT | Pipeline Azure DevOps |
+| [Infra Report](scripts/infra_report/README.md) | Snapshot diario do servidor (CPU/RAM/disco/containers/backup) | Diario 4h BRT | Pipeline Azure DevOps |
 | [Daily Language Practice](scripts/daily_language_practice/README.md) | Conteudo diario de idiomas (EN/ES/FR) via IA | Diario 9h BRT | Pipeline Azure DevOps |
 
 ## Tech Stack
@@ -27,10 +28,13 @@ scripts/
     main.py, config.py, ...      Watchdog de servicos (cron)
   database_backup/
     main.py, config.py, ...      Backup PostgreSQL (pipeline)
+  infra_report/
+    main.py, config.py, ...      Snapshot do servidor (pipeline)
   daily_language_practice/
     main.py, config.py, ...      Conteudo de idiomas (pipeline)
 
 database-backup.yml              Pipeline Azure DevOps
+infra-report.yml                 Pipeline Azure DevOps
 daily-language-practice.yml      Pipeline Azure DevOps
 requirements.txt                 Dependencias Python
 ```
