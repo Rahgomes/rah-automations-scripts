@@ -116,13 +116,6 @@ SERVICES: list[Service] = [
         container="video-tools",
         strategy=RecoveryStrategy.RESTART,
     ),
-    Service(
-        name="TranscriLab DEV",
-        url="https://transcrilab-dev.ramongomessilva.com.br/",
-        container="i0o4sswwcko888o4o8c4ow0s",
-        strategy=RecoveryStrategy.RESTART,
-        accept_codes=frozenset({200, 302, 304}),
-    ),
 ]
 
 
