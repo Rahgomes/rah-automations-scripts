@@ -118,7 +118,7 @@ SERVICES: list[Service] = [
     ),
     Service(
         name="RAG NexaLume API",
-        url="https://rag-nexalume.ramongomessilva.com.br/health",
+        url="https://rag-site.nexalumedigital.com.br/health",
         container="rag-nexalume-api",
         strategy=RecoveryStrategy.RESTART,
     ),
