@@ -116,6 +116,12 @@ SERVICES: list[Service] = [
         container="video-tools",
         strategy=RecoveryStrategy.RESTART,
     ),
+    Service(
+        name="RAG NexaLume API",
+        url="https://rag-nexalume.ramongomessilva.com.br/health",
+        container="rag-nexalume-api",
+        strategy=RecoveryStrategy.RESTART,
+    ),
 ]
 
 
