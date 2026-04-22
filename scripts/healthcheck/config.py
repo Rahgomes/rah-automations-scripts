@@ -122,6 +122,12 @@ SERVICES: list[Service] = [
         container="rag-nexalume-api",
         strategy=RecoveryStrategy.RESTART,
     ),
+    Service(
+        name="Rah Memory Bot",
+        url="https://rah-memory-bot.ramongomessilva.com.br/health",
+        container="rah-memory-bot",
+        strategy=RecoveryStrategy.RESTART,
+    ),
 ]
 
 
