@@ -17,6 +17,48 @@ Pipeline Azure DevOps (`database-backup.yml`):
 - Pool: `rah-self-hosted`
 - Variable Groups: `Telegram-Rah-Automation-Notifier-Credentials`, `Database-Backup-Credentials`
 
+## Retencao
+
+**A retencao nao esta neste codigo.** O script so escreve; quem apaga e uma regra
+de ciclo de vida (ILM) do proprio MinIO, no bucket `postgres-backups`. Sem ela, os
+dumps se acumulariam para sempre.
+
+Estado atual (definido em 2026-08-21):
+
+| Regra | Prefixo | Dias |
+|---|---|---|
+| `expire-imoveis-crawler-after-3-days` | `imoveis_crawler/` | 3 |
+| `expire-backups-after-14-days` | bucket inteiro | 14 |
+
+O `imoveis_crawler` tem regra propria porque sozinho pesa **6,9 GB por dump**,
+contra menos de 60 MB somando **todos** os outros bancos. Com sete copias ele
+ocupava 41 GB, mais de 98% do bucket. Como o projeto esta congelado, historico
+ali vale pouco: tres dias cobrem um fim de semana e e o suficiente.
+
+Os demais bancos foram de 7 para 14 dias no mesmo movimento. Dobrar a janela para
+perceber um problema custa uns 400 MB, e ha coisa em producao no meio deles.
+
+**Quando duas regras alcancam o mesmo objeto, o MinIO aplica a de prefixo mais
+especifico.** Nao e preciso deduzir: `mc stat --json` devolve `expiration` e
+`expirationRuleID` ja calculados para o objeto.
+
+```bash
+# Ver as regras
+mc ilm rule ls rahminio/postgres-backups
+
+# Conferir qual regra pegou um objeto especifico
+mc stat --json rahminio/postgres-backups/<banco>/<ano>/<mes>/<dia>/<arquivo>.dump \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['expiration'], d['expirationRuleID'])"
+
+# Alterar (exporta, edita, importa)
+mc ilm rule export rahminio/postgres-backups > ilm.json
+mc ilm rule import rahminio/postgres-backups < ilm.json
+```
+
+Banco novo e pesado que aparecer merece regra propria. O `drift_detector` avisa
+sobre prefixo orfao, mas ninguem avisa sobre prefixo gordo: vale olhar
+`du -sh /opt/minio-data/postgres-backups/*` de vez em quando.
+
 ## Variaveis de ambiente
 
 | Variavel | Obrigatoria | Descricao |
