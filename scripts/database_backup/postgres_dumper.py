@@ -10,6 +10,54 @@ logger = logging.getLogger(__name__)
 PG_DUMP_TIMEOUT = 3600  # 1 hour hard cap per database
 
 
+STALE_DUMP_AGE_SECONDS = 2 * 3600  # acima do PG_DUMP_TIMEOUT, nunca pega dump em curso
+
+
+def sweep_stale_dumps() -> int:
+    """Remove dumps orfaos de execucoes anteriores que morreram sem rodar o finally.
+
+    O cleanup normal vive no `finally` de _backup_single_database, mas ele nao roda
+    quando o processo leva SIGKILL (OOM killer, timeout do agente). Cada orfao desses
+    e um arquivo de varios GB parado em /tmp.
+
+    So remove arquivos mais velhos que STALE_DUMP_AGE_SECONDS, que e maior que o
+    PG_DUMP_TIMEOUT — assim nunca toca num dump que esteja sendo gerado agora.
+    """
+    import os
+    import tempfile
+    import time
+
+    tmpdir = Path(tempfile.gettempdir())
+    cutoff = time.time() - STALE_DUMP_AGE_SECONDS
+    removed = 0
+    freed = 0
+
+    for candidate in tmpdir.glob("*.dump"):
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            stat = candidate.stat()
+            if stat.st_mtime >= cutoff:
+                continue
+            size = stat.st_size
+            candidate.unlink()
+        except OSError as e:
+            logger.warning("Nao consegui remover dump orfao '%s': %s", candidate, e)
+            continue
+        removed += 1
+        freed += size
+        logger.info("Removido dump orfao: %s (%s)", candidate.name, _format_bytes(size))
+
+    if removed:
+        logger.warning(
+            "Limpei %d dump(s) orfao(s), liberando %s. "
+            "Indica execucao anterior morta antes do cleanup (OOM ou timeout).",
+            removed,
+            _format_bytes(freed),
+        )
+    return removed
+
+
 def dump_database(postgres: PostgresConfig, database: str) -> Path:
     """Run pg_dump in custom format for a single database.
 

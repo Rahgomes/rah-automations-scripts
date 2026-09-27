@@ -54,6 +54,11 @@ def _backup_single_database(
 
 def main() -> int:
     logger.info("Starting database backup run")
+
+    # Varre dumps orfaos antes de comecar: se a execucao anterior levou SIGKILL
+    # (OOM killer, timeout do agente), o finally nao rodou e sobrou arquivo de GBs.
+    postgres_dumper.sweep_stale_dumps()
+
     try:
         cfg = config.load()
     except RuntimeError as e:
