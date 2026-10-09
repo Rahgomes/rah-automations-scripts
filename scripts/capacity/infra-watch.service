@@ -1,0 +1,11 @@
+[Unit]
+Description=infra-watch: vigia de capacidade (CPU, steal, RAM, disco)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/infra-watch
+# O vigia nunca pode ser o ofensor: prioridade baixa, teto de CPU e de tempo.
+Nice=5
+CPUQuota=20%
+MemoryMax=64M
+TimeoutStartSec=45

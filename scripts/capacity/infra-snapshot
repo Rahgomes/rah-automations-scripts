@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# infra-snapshot: fotografia do servidor no momento de um alerta.
+# Chamado pelo infra-watch (com nice e timeout) ou à mão. No máximo 1 a cada
+# SNAPSHOT_MIN_GAP segundos. Imprime o caminho do arquivo na última linha.
+set -uo pipefail
+
+CONF=${INFRA_WATCH_CONF:-/etc/infra-watch.env}
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+STATE_DIR=${STATE_DIR:-/var/lib/infra-watch}
+SNAP_DIR=${SNAP_DIR:-/var/log/infra-watch}
+SNAPSHOT_MIN_GAP=${SNAPSHOT_MIN_GAP:-600}
+RETENTION_DAYS=${RETENTION_DAYS:-30}
+
+mkdir -p "$SNAP_DIR"
+now=$(date +%s)
+last=$(cat "$STATE_DIR/snapshot_last" 2>/dev/null || echo 0)
+if [ "${1:-}" != "--force" ] && [ $(( now - last )) -lt "$SNAPSHOT_MIN_GAP" ]; then
+  echo "$(cat "$STATE_DIR/snapshot_path" 2>/dev/null)"; exit 0
+fi
+out="$SNAP_DIR/$(date -u +%F-%H%M).txt"
+echo "$now" > "$STATE_DIR/snapshot_last"; echo "$out" > "$STATE_DIR/snapshot_path"
+find "$SNAP_DIR" -name '*.txt' -mtime +"$RETENTION_DAYS" -delete
+
+{
+  echo "# $(date -u +%FT%TZ) $(hostname)"
+  echo; echo "## Carga e memória"
+  cat /proc/loadavg; grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
+
+  echo; echo "## CPU por 5s (vmstat; st = steal do provedor)"
+  vmstat 5 2 | tail -n 3
+
+  echo; echo "## Top 12 processos por CPU"
+  ps -eo pid,user,etimes,pcpu,pmem,args --sort=-pcpu | head -n 13 | cut -c1-180
+
+  echo; echo "## Fila: processos prontos esperando CPU (5 amostras)"
+  for _ in 1 2 3 4 5; do ps -eo stat,comm --no-headers | awk '$1 ~ /^R/ {print $2}'; sleep 1; done \
+    | sort | uniq -c | sort -rn | head -n 10
+
+  echo; echo "## Containers: CPU em 5s (cgroup, inclui steal) e RAM atual"
+  declare -A a
+  for d in /sys/fs/cgroup/system.slice/docker-*.scope; do
+    [ -r "$d/cpu.stat" ] && a[$d]=$(awk '/^usage_usec/ {print $2}' "$d/cpu.stat")
+  done
+  sleep 5
+  for d in "${!a[@]}"; do
+    b=$(awk '/^usage_usec/ {print $2}' "$d/cpu.stat" 2>/dev/null) || continue
+    id=${d##*/docker-}; id=${id%.scope}
+    name=$(grep -o '"Name":"/[^"]*"' "/var/lib/docker/containers/$id/config.v2.json" 2>/dev/null \
+      | head -n 1 | cut -d/ -f2 | tr -d '"')
+    mem=$(( $(cat "$d/memory.current" 2>/dev/null || echo 0) / 1048576 ))
+    printf '%5d%% %6dMB %s\n' $(( (b - ${a[$d]}) / 50000 )) "$mem" "${name:-${id:0:12}}"
+  done | sort -rn | head -n 15
+
+  echo; echo "## Trabalho pesado e CI"
+  pgrep -fa 'Agent.Worker|pytest|vitest|tsc|pnpm|npm (ci|install)|pip install|uv sync|docker build|buildkit|chrome' \
+    | grep -v pgrep | cut -c1-160 | head -n 15
+
+  echo; echo "## Timers e serviços que rodaram nos últimos 15 min"
+  journalctl --since -15min -q --no-pager -o cat 2>/dev/null | grep -E ': Consumed [0-9.]+(ms|s|min) CPU' | cut -d: -f1 | sort | uniq -c | sort -rn | head -n 10
+
+  echo; echo "## Disco"
+  df -hP / /var/lib/docker 2>/dev/null | sort -u
+} > "$out" 2>&1
+
+echo "$out"

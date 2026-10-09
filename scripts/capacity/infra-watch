@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# infra-watch: vigia de capacidade do servidor (CPU, steal, RAM, swap, disco).
+# Roda a cada minuto pelo systemd. Bash puro lendo /proc e /sys: nada de
+# interpretador nem docker CLI, para o vigia nunca virar o ofensor.
+# Alerta no Telegram só na mudança de estado e dispara o infra-snapshot.
+set -uo pipefail
+
+CONF=${INFRA_WATCH_CONF:-/etc/infra-watch.env}
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+SERVER_NAME=${SERVER_NAME:-$(hostname)}
+STATE_DIR=${STATE_DIR:-/var/lib/infra-watch}
+DISK_PATHS=${DISK_PATHS:-/}
+RETENTION_DAYS=${RETENTION_DAYS:-30}
+# Faixas (percentuais). CPU = uso real, sem steal, idle e iowait.
+CPU_WARN=${CPU_WARN:-50};   CPU_WARN_MIN=${CPU_WARN_MIN:-15}
+CPU_CRIT=${CPU_CRIT:-70};   CPU_CRIT_MIN=${CPU_CRIT_MIN:-5}
+STEAL_WARN=${STEAL_WARN:-20}; STEAL_MIN=${STEAL_MIN:-5}
+MEM_AVAIL_WARN=${MEM_AVAIL_WARN:-30}; MEM_AVAIL_CRIT=${MEM_AVAIL_CRIT:-15}; MEM_MIN=${MEM_MIN:-3}
+SWAP_WARN=${SWAP_WARN:-50}
+DISK_WARN=${DISK_WARN:-70}; DISK_CRIT=${DISK_CRIT:-85}
+# Orçamento de CPU do próprio vigia por rodada (não conta a fotografia).
+# Medido em tempo de CPU, não de relógio: sob teto do provedor o relógio
+# estica, e o vigia não pode se desligar justo quando é mais necessário.
+BUDGET_MS=${BUDGET_MS:-200}
+# Falhas seguidas antes de desistir e parar o timer.
+MAX_FAILS=${MAX_FAILS:-3}
+
+mkdir -p "$STATE_DIR"
+NOW=$(date +%s)
+T0=$(date +%s%N)
+
+notify() { # $1 = texto
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
+  timeout 10 curl -fsS -o /dev/null "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=[${SERVER_NAME}] $1" || true
+}
+
+fail() { # $1 = motivo. Backoff 1/5/15 min; na falha MAX_FAILS para o timer.
+  local n; n=$(( $(cat "$STATE_DIR/fails" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$STATE_DIR/fails"
+  local wait=(60 300 900); echo $(( NOW + ${wait[$(( n > 3 ? 2 : n - 1 ))]} )) > "$STATE_DIR/next_run"
+  printf '%s fail %d: %s\n' "$(date -u +%FT%TZ)" "$n" "$1" >> "$STATE_DIR/watch.log"
+  if [ "$n" -ge "$MAX_FAILS" ]; then
+    notify "infra-watch parou após $n falhas seguidas. Último erro: $1. Carga: $(cut -d' ' -f1-3 /proc/loadavg). Religar: systemctl start infra-watch.timer"
+    systemctl stop infra-watch.timer 2>/dev/null
+  elif [ "$n" -eq 1 ]; then
+    notify "infra-watch falhou ($1). Tentando de novo em 1 min."
+  fi
+  exit 1
+}
+
+# Backoff ativo: pula a rodada sem contar como falha.
+[ "$NOW" -lt "$(cat "$STATE_DIR/next_run" 2>/dev/null || echo 0)" ] && exit 0
+
+# --- CPU e steal: delta do /proc/stat contra a rodada anterior ---
+read -r _ u n s i w irq sirq st _ < /proc/stat || fail "leitura de /proc/stat"
+cur="$u $n $s $i $w $irq $sirq $st"
+prev=$(cat "$STATE_DIR/cpu_prev" 2>/dev/null)
+echo "$cur" > "$STATE_DIR/cpu_prev"
+[ -z "$prev" ] && exit 0   # primeira rodada: só grava a base
+read -r pu pn ps pi pw pirq psirq pst <<< "$prev"
+du_=$(( (u-pu) + (n-pn) + (s-ps) + (irq-pirq) + (sirq-psirq) ))
+dst=$(( st-pst )); didle=$(( (i-pi) + (w-pw) ))
+tot=$(( du_ + dst + didle ))
+[ "$tot" -le 0 ] && exit 0
+cpu=$(( 100 * du_ / tot )); steal=$(( 100 * dst / tot )); iow=$(( 100 * (w-pw) / tot ))
+
+# --- RAM e swap ---
+while read -r k v _; do
+  case $k in MemTotal:) mt=$v;; MemAvailable:) ma=$v;; SwapTotal:) swt=$v;; SwapFree:) swf=$v;; esac
+done < /proc/meminfo
+mem_avail=$(( 100 * ma / mt ))
+swap_used=0; [ "${swt:-0}" -gt 0 ] && swap_used=$(( 100 * (swt - swf) / swt ))
+
+# --- Disco: o caminho mais cheio dentre DISK_PATHS ---
+disk=0; disk_path=/
+for p in $DISK_PATHS; do
+  v=$(timeout 5 df -P "$p" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}') || fail "df $p"
+  [ -n "$v" ] && [ "$v" -gt "$disk" ] && { disk=$v; disk_path=$p; }
+done
+
+read -r load1 _ _ runq _ < /proc/loadavg; runq=${runq%%/*}
+
+# --- Janela móvel (últimos 15 min) para média de CPU e steal ---
+hist="$STATE_DIR/window"
+{ tail -n 14 "$hist" 2>/dev/null; echo "$cpu $steal $mem_avail"; } > "$hist.tmp" && mv "$hist.tmp" "$hist"
+avg() { # $1 = coluna, $2 = últimos N minutos
+  tail -n "$2" "$hist" | awk -v c="$1" -v n="$2" '{s+=$c; k++} END{ if (k<n) print -1; else printf "%d", s/k }'
+}
+cpu_w=$(avg 1 "$CPU_WARN_MIN"); cpu_c=$(avg 1 "$CPU_CRIT_MIN"); steal_a=$(avg 2 "$STEAL_MIN")
+mem_max=$(tail -n "$MEM_MIN" "$hist" | awk '{ if ($3>m) m=$3 } END{print m+0}')  # pior caso = maior disponível na janela
+
+# --- Estado de cada sinal: ok / warn / crit ---
+level() { # $1 = valor, $2 = warn, $3 = crit (crit vazio = sem crit); maior é pior
+  if [ "$1" -lt 0 ]; then echo ok
+  elif [ -n "$3" ] && [ "$1" -ge "$3" ]; then echo crit
+  elif [ "$1" -ge "$2" ]; then echo warn
+  else echo ok; fi
+}
+declare -A now_state msg
+now_state[cpu]=$( [ "$(level "$cpu_c" 999 "$CPU_CRIT")" = crit ] && echo crit || level "$cpu_w" "$CPU_WARN" "" )
+msg[cpu]="CPU média ${cpu_w}% (15 min), ${cpu_c}% (5 min)"
+now_state[steal]=$(level "$steal_a" "$STEAL_WARN" "")
+msg[steal]="steal médio ${steal_a}% em ${STEAL_MIN} min: provável teto do provedor"
+# RAM: menor é pior; usa o maior disponível da janela para exigir MEM_MIN minutos seguidos.
+now_state[mem]=ok
+[ "$(tail -n "$MEM_MIN" "$hist" | wc -l)" -ge "$MEM_MIN" ] && {
+  if [ "$mem_max" -lt "$MEM_AVAIL_CRIT" ]; then now_state[mem]=crit
+  elif [ "$mem_max" -lt "$MEM_AVAIL_WARN" ]; then now_state[mem]=warn; fi; }
+msg[mem]="RAM disponível ${mem_avail}%"
+now_state[swap]=$(level "$swap_used" "$SWAP_WARN" "")
+msg[swap]="swap em uso ${swap_used}%"
+now_state[disk]=$(level "$disk" "$DISK_WARN" "$DISK_CRIT")
+msg[disk]="disco ${disk_path} em ${disk}%"
+
+# CPU gasta pelo vigia até aqui (shell + filhos), antes de alerta e fotografia.
+# Lido de /proc/$$/stat sem subshell: utime+stime do shell e dos filhos já
+# encerrados (df, awk, tail), em ticks de 10 ms.
+read -r -a pst_ < /proc/$$/stat
+WATCH_CPU_MS=$(( (pst_[13] + pst_[14] + pst_[15] + pst_[16]) * 10 ))
+
+# --- Alerta só na mudança de estado ---
+changed=""; worst=ok
+for k in cpu steal mem swap disk; do
+  old=$(cat "$STATE_DIR/state_$k" 2>/dev/null || echo ok)
+  new=${now_state[$k]}
+  [ "$new" = crit ] && worst=crit
+  [ "$new" = warn ] && [ "$worst" = ok ] && worst=warn
+  if [ "$new" != "$old" ]; then
+    echo "$new" > "$STATE_DIR/state_$k"
+    case $new in crit) tag="CRÍTICO";; warn) tag="ATENÇÃO";; *) tag="normalizado";; esac
+    changed+="${tag}: ${msg[$k]}"$'\n'
+  fi
+done
+if [ -n "$changed" ]; then
+  snap=""
+  if [ "$worst" != ok ] && command -v infra-snapshot >/dev/null; then
+    snap=$(timeout 30 nice -n 10 infra-snapshot 2>/dev/null | tail -n 1)
+  fi
+  notify "${changed}Carga ${load1}, fila ${runq}.${snap:+ Fotografia: $snap}"
+fi
+
+# --- Métricas: 1 linha por minuto, 1 arquivo por dia, retenção RETENTION_DAYS ---
+day=$(date -u +%F)
+mfile="$STATE_DIR/metrics-$day.csv"
+[ -f "$mfile" ] || {
+  echo "ts,cpu,steal,iowait,load1,runq,mem_avail,swap_used,disk,watch_ms,watch_cpu_ms" > "$mfile"
+  find "$STATE_DIR" -name 'metrics-*.csv' -mtime +"$RETENTION_DAYS" -delete
+}
+ms=$(( ($(date +%s%N) - T0) / 1000000 ))
+echo "$NOW,$cpu,$steal,$iow,$load1,$runq,$mem_avail,$swap_used,$disk,$ms,$WATCH_CPU_MS" >> "$mfile"
+
+# --- Batimento e orçamento do próprio vigia ---
+printf '{"ultimo_ok":%d,"duracao_ms":%d,"cpu_ms":%d,"estado":"%s"}\n' "$NOW" "$ms" "$WATCH_CPU_MS" "$worst" > "$STATE_DIR/heartbeat.json"
+[ "$WATCH_CPU_MS" -gt "$BUDGET_MS" ] && fail "rodada gastou ${WATCH_CPU_MS}ms de CPU (orçamento ${BUDGET_MS}ms)"
+rm -f "$STATE_DIR/fails" "$STATE_DIR/next_run"
+exit 0
