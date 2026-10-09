@@ -26,4 +26,4 @@ heavy -s                              # mostra a fila
 - O job roda na pasta e com o ambiente de quem chamou. O ambiente vai para um arquivo 600 apagado no início do job.
 - Sair com Ctrl+C não cancela o job. Cancelar: `TS_SOCKET=/run/heavy/tsp.sock tsp -r <id>` (na fila) ou `-k <id>` (rodando).
 - Rastro: `/var/log/heavy/jobs.jsonl`, uma linha por job com projeto, tipo, espera, duração, CPU, pico de RAM e resultado.
-- **`docker build` não fica sob o teto**: quem compila é o dockerd/BuildKit, fora do serviço do job. Para limitar build, use um builder buildx dedicado com limite (item B7 do roteiro).
+- **`docker build`**: quem compila é o BuildKit, fora do serviço do job. Por isso existe o builder `limitado` (container com 1,5 vCPU e 4G, `default-load=true`, criado pelo `install.sh`): use `BUILDX_BUILDER=limitado docker build ...`. O agente do Azure já aponta para ele (drop-in `cpu-limit.conf`).

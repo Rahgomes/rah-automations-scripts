@@ -7,6 +7,9 @@ install -m 755 infra-watch infra-snapshot heavy heavy-run /usr/local/bin/
 mkdir -p /var/lib/heavy /var/log/heavy/out && chmod 700 /var/lib/heavy
 install -m 644 infra-watch.service infra-watch.timer /etc/systemd/system/
 [ -f /etc/infra-watch.env ] || install -m 600 infra-watch.env.example /etc/infra-watch.env
+# Builder com teto para docker build (o BuildKit roda fora de qualquer cota de serviço).
+docker buildx inspect limitado >/dev/null 2>&1 || docker buildx create --name limitado --driver docker-container \
+  --driver-opt cpu-quota=150000,cpu-period=100000,memory=4g,memory-swap=4g,default-load=true >/dev/null
 systemctl daemon-reload
 systemctl enable --now infra-watch.timer
 echo "ok: ajuste /etc/infra-watch.env e acompanhe com: tail -f /var/lib/infra-watch/metrics-\$(date -u +%F).csv"
