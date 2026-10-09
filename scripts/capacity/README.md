@@ -15,11 +15,14 @@ Contexto e decisões: `tmp-clones/infra-capacidade/ROTEIRO.md` (servidor srv9861
 heavy -- pnpm test                    # entra na fila, espera a vez, mostra a saída, devolve o rc
 heavy -l rah-crm -k test -- pytest -n 2
 heavy -c 200 -m 6G -t 45 -- docker build .   # mais CPU, RAM e tempo (veja a nota abaixo)
-heavy -u -- ...                       # urgente: fura a fila, nunca interrompe quem roda
+heavy -u -- ...                       # urgente: fura a fila; se quem roda é pausável, congela e retoma no fim
+heavy -p -t 120 -- ./crawler.sh       # longo e pausável (crawler e backfill já são por padrão)
 heavy -s                              # mostra a fila
 ```
 
-- Cada job roda num serviço transitório do systemd com `CPUQuota` (padrão 1 vCPU), `MemoryMax` (4G), tempo máximo (30 min) e prioridade baixa. Estourou tempo ou memória: é morto e o motivo aparece.
+- Cada job roda num serviço transitório do systemd com `CPUQuota` (padrão 1 vCPU), `MemoryMax` (4G), tempo máximo (30 min) e prioridade baixa. Estourou tempo (rc 124) ou memória: é morto e o motivo aparece.
+- O tempo máximo conta só o tempo **ativo**: job congelado para um urgente não morre por timeout ao ser retomado. Um urgente por vez; o retomar acontece mesmo se o urgente falhar.
+- Quem espera na fila vê, a cada 30 s, quantos estão na frente e o que está rodando.
 - O job roda na pasta e com o ambiente de quem chamou. O ambiente vai para um arquivo 600 apagado no início do job.
 - Sair com Ctrl+C não cancela o job. Cancelar: `TS_SOCKET=/run/heavy/tsp.sock tsp -r <id>` (na fila) ou `-k <id>` (rodando).
 - Rastro: `/var/log/heavy/jobs.jsonl`, uma linha por job com projeto, tipo, espera, duração, CPU, pico de RAM e resultado.

@@ -14,7 +14,9 @@
 #   -c CPU      teto de CPU em % de 1 vCPU (padrão 100 = 1 vCPU; máx. 200)
 #   -m MEM      teto de memória (padrão 4G)
 #   -t MIN      tempo máximo em minutos (padrão 30); estourou, o job é morto
-#   -u          urgente: vai para a frente da fila (nunca interrompe quem roda)
+#   -u          urgente: vai para a frente da fila. Se quem roda é pausável,
+#               ele é congelado, o urgente roda, e ele é retomado no fim
+#   -p          este job é pausável (padrão para crawler e backfill)
 #   -q          não acompanha a saída; só enfileira e devolve o id
 set -uo pipefail
 
@@ -26,14 +28,20 @@ export TMPDIR="$HEAVY_LOG/out"
 mkdir -p "$HEAVY_HOME/jobs" "$HEAVY_LOG/out" "$(dirname "$TS_SOCKET")"
 chmod 700 "$HEAVY_HOME"
 
+RUNNING="$HEAVY_HOME/running"
+status() { # o que está rodando agora, em uma linha
+  [ -e "$RUNNING" ] || { echo "heavy: nada rodando"; return; }
+  ( . "$RUNNING"; st=$(systemctl show "$unit.service" -p FreezerState --value 2>/dev/null)
+    echo "heavy: rodando $label/$kind há $(( ($(date +%s) - start) / 60 )) min (máx. $tmin min ativos)${st:+, $st}$([ "$pausable" = 1 ] && echo ', pausável')" )
+}
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
-label=""; kind=""; cpu=100; mem=4G; tmin=30; urgent=0; quiet=0
-while getopts "l:k:c:m:t:uqsh" o; do
+label=""; kind=""; cpu=100; mem=4G; tmin=30; urgent=0; quiet=0; pausable=""
+while getopts "l:k:c:m:t:upqsh" o; do
   case $o in
     l) label=$OPTARG;; k) kind=$OPTARG;; c) cpu=$OPTARG;; m) mem=$OPTARG;; t) tmin=$OPTARG;;
-    u) urgent=1;; q) quiet=1;;
-    s) tsp; exit 0;;
+    u) urgent=1;; q) quiet=1;; p) pausable=1;;
+    s) status; tsp; exit 0;;
     h) usage; exit 0;;
     *) usage; exit 2;;
   esac
@@ -66,7 +74,9 @@ mkdir -m 700 "$jdir"
 export -p > "$jdir/env"; chmod 600 "$jdir/env"
 printf '%s' "$PWD" > "$jdir/cwd"
 printf '%q ' "$@" > "$jdir/cmd"
+case $kind in crawler|backfill) pausable=${pausable:-1};; esac
 cat > "$jdir/meta" <<EOF
+pausable=${pausable:-0}
 label=$(printf %q "$label")
 kind=$kind
 cpu=$cpu
@@ -76,18 +86,37 @@ enqueued=$(date +%s)
 caller=$(printf %q "${HEAVY_CALLER:-$(ps -o comm= -p $PPID 2>/dev/null)}")
 EOF
 
+find "$HEAVY_LOG/out" -type f -mtime +7 -delete 2>/dev/null
+
+# Urgente com job pausável rodando: congela, roda por fora da fila, retoma.
+# Um urgente por vez (flock). O retomar fica no trap: sai de qualquer jeito.
+if [ "$urgent" = 1 ] && [ -e "$RUNNING" ] && ( . "$RUNNING"; [ "$pausable" = 1 ] ); then
+  exec 9>"$(dirname "$TS_SOCKET")/urgent.lock"; flock 9
+  victim=$( . "$RUNNING"; echo "$unit" ); vlabel=$( . "$RUNNING"; echo "$label/$kind" )
+  if systemctl freeze "$victim.service" 2>/dev/null; then
+    trap 'systemctl thaw "$victim.service" 2>/dev/null && echo "heavy: retomei $vlabel" >&2' EXIT
+    echo "heavy: pausei $vlabel para rodar este urgente; retomo no fim" >&2
+    HEAVY_URGENT=1 heavy-run "$jdir"
+    exit $?
+  fi
+fi
+
 ahead=$(tsp | awk 'NR>1 && ($2=="running" || $2=="queued")' | wc -l)
 id=$(tsp -L "$label:$kind" heavy-run "$jdir")
 [ "$urgent" = 1 ] && tsp -u "$id" >/dev/null 2>&1
-find "$HEAVY_LOG/out" -type f -mtime +7 -delete 2>/dev/null
 
 if [ "$quiet" = 1 ]; then echo "$id"; exit 0; fi
-if [ "$ahead" -gt 0 ]; then
-  echo "heavy: job $id ($label/$kind) na fila; $ahead na frente. Ver: heavy -s" >&2
-fi
 # Sair daqui (Ctrl+C) não cancela o job: ele segue na fila. Cancelar: tsp -r <id> ou tsp -k <id>.
 trap 'echo "heavy: você saiu, o job $id continua. Ver: heavy -s" >&2; exit 130' INT
-# Espera a vez antes de acompanhar: o tsp só segue a saída de job já iniciado.
-while st=$(tsp -s "$id" 2>/dev/null) && [ "$st" = queued ]; do sleep 2; done
+# Espera a vez antes de acompanhar (o tsp só segue a saída de job já
+# iniciado) e conta, a cada 30 s, o que está na frente.
+n=0
+while st=$(tsp -s "$id" 2>/dev/null) && [ "$st" = queued ]; do
+  if [ $((n % 15)) -eq 0 ]; then
+    ahead=$(tsp | awk -v id="$id" '$1==id {print k+0; exit} NR>1 && ($2=="running"||$2=="queued") {k++}')
+    echo "heavy: job $id ($label/$kind) esperando, $ahead na frente. Agora: $(status | sed 's/^heavy: //')" >&2
+  fi
+  n=$((n + 1)); sleep 2
+done
 tsp -t "$id" 2>/dev/null
 tsp -w "$id"

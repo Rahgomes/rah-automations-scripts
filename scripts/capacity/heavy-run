@@ -16,13 +16,27 @@ summary="$jdir/summary"
 
 echo "heavy: começou $(date -u +%T) UTC | $label/$kind | CPU ${cpu}% · RAM $mem · até ${tmin} min" >&2
 
-# O "Memory peak" do resumo do systemd vem errado em serviço transitório (mede
-# depois que os processos saem). O kernel mantém memory.peak vivo enquanto o
-# job roda: um amostrador lê a cada 1 s e guarda o último valor.
+RUNNING=${HEAVY_HOME:-/var/lib/heavy}/running
 cg="/sys/fs/cgroup/system.slice/$unit.service"
-( while :; do
-    v=$(cat "$cg/memory.peak" 2>/dev/null) && echo "$v" > "$jdir/peak"
-    [ -d "$cg" ] || { [ -f "$jdir/peak" ] && break; }
+printf 'unit=%s\nlabel=%q\nkind=%s\nstart=%s\ntmin=%s\npausable=%s\n' "$unit" "$label" "$kind" "$start" "$tmin" "${pausable:-0}" > "$RUNNING.$unit"
+# "running" aponta para o job da fila; urgente rodando por fora não sobrescreve.
+[ "${HEAVY_URGENT:-0}" = 1 ] || ln -sfn "$RUNNING.$unit" "$RUNNING"
+
+# Vigia do job, fora do serviço (nunca é congelado junto):
+#  - pico de RAM: o "Memory peak" do resumo do systemd vem errado em serviço
+#    transitório; o kernel mantém memory.peak vivo enquanto o job roda.
+#  - tempo máximo: conta só o tempo ativo. Job pausado para um urgente não
+#    pode morrer por timeout ao ser retomado.
+( active=0; while :; do
+    if [ -d "$cg" ]; then
+      cat "$cg/memory.peak" > "$jdir/peak" 2>/dev/null
+      [ "$(cat "$cg/cgroup.freeze" 2>/dev/null)" = 1 ] || active=$((active + 1))
+      echo "$active" > "$jdir/active"
+      if [ "$active" -gt $((tmin * 60)) ] && [ ! -f "$jdir/timeout" ]; then
+        touch "$jdir/timeout"; systemctl kill "$unit.service" 2>/dev/null
+        ( sleep 30; systemctl kill -s KILL "$unit.service" 2>/dev/null ) &
+      fi
+    elif [ -f "$jdir/peak" ]; then break; fi
     sleep 1
   done ) &
 sampler=$!
@@ -31,14 +45,15 @@ sampler=$!
 # com o do comando; o tee guarda uma cópia para extrair os números.
 systemd-run --wait --pipe --collect --unit="$unit" \
   -p CPUQuota="${cpu}%" -p MemoryMax="$mem" -p MemorySwapMax=0 \
-  -p RuntimeMaxSec="$((tmin * 60))" -p Nice=10 -p IOSchedulingClass=idle \
+  -p RuntimeMaxSec="$((tmin * 60 * 4))" -p Nice=10 -p IOSchedulingClass=idle \
   --working-directory="$cwd" \
   bash -c 'set -a; . "$1"; set +a; rm -f "$1"; eval "exec $2"' heavy "$jdir/env" "$cmd" \
   2> >(tee "$summary" | grep --line-buffered -vE '^(Running as unit|Finished with result|Main processes terminated|Service runtime|CPU time consumed|Memory (swap )?peak)' >&2)
 rc=$?
 end=$(date +%s)
 kill "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null
-rm -f "$jdir/env"
+rm -f "$jdir/env" "$RUNNING.$unit"
+[ "$(readlink "$RUNNING" 2>/dev/null)" = "$RUNNING.$unit" ] && rm -f "$RUNNING"
 
 field() { grep -m1 "^$1:" "$summary" 2>/dev/null | cut -d: -f2- | sed 's/^ *//'; }
 to_ms() { # "1min 2.5s", "345ms", "2.1s" -> ms
@@ -50,6 +65,8 @@ to_ms() { # "1min 2.5s", "345ms", "2.1s" -> ms
     printf "%d", t }'
 }
 result=$(field "Finished with result")
+# Morto pelo vigia do job: rc 124, como o timeout(1), para quem chamou não achar que passou.
+[ -f "$jdir/timeout" ] && { result=timeout; rc=124; }
 cpu_ms=$(field "CPU time consumed" | to_ms)
 mem_mb=$(( $(cat "$jdir/peak" 2>/dev/null || echo 0) / 1048576 ))
 # Morto por memória antes da 1ª amostra: o pico foi o próprio teto.
