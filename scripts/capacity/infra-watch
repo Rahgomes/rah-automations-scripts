@@ -24,6 +24,10 @@ DISK_WARN=${DISK_WARN:-70}; DISK_CRIT=${DISK_CRIT:-85}
 # Medido em tempo de CPU, não de relógio: sob teto do provedor o relógio
 # estica, e o vigia não pode se desligar justo quando é mais necessário.
 BUDGET_MS=${BUDGET_MS:-200}
+# Containers unhealthy: checa a cada HEALTH_EVERY s e alerta após HEALTH_MIN min.
+# O Docker reinicia container que morre, mas não o que fica unhealthy (o
+# Planka ficou 19 h assim depois do reboot de 09/10).
+HEALTH_EVERY=${HEALTH_EVERY:-300}; HEALTH_MIN=${HEALTH_MIN:-10}
 # Falhas seguidas antes de desistir e parar o timer.
 MAX_FAILS=${MAX_FAILS:-3}
 
@@ -141,6 +145,27 @@ if [ -n "$changed" ]; then
     snap=$(timeout 30 nice -n 10 infra-snapshot 2>/dev/null | tail -n 1)
   fi
   notify "${changed}Carga ${load1}, fila ${runq}.${snap:+ Fotografia: $snap}"
+fi
+
+# --- Containers unhealthy (1 consulta à API do Docker, filtrada no daemon) ---
+if [ $(( NOW - $(cat "$STATE_DIR/health_last" 2>/dev/null || echo 0) )) -ge "$HEALTH_EVERY" ] && [ -S /var/run/docker.sock ]; then
+  echo "$NOW" > "$STATE_DIR/health_last"
+  sick=$(timeout 5 curl -s --unix-socket /var/run/docker.sock -G http://d/containers/json \
+    --data-urlencode 'filters={"health":["unhealthy"]}' | grep -o '"Names":\["/[^"]*' | cut -d/ -f2)
+  hfile="$STATE_DIR/health_since"; touch "$hfile"
+  new_h=""; hmsg=""
+  for c in $sick; do
+    since=$(awk -v c="$c" '$1==c {print $2; exit}' "$hfile"); since=${since:-$NOW}; alerted=$(awk -v c="$c" '$1==c {print $3; exit}' "$hfile")
+    if [ -z "$alerted" ] && [ $(( NOW - since )) -ge $(( HEALTH_MIN * 60 )) ]; then
+      hmsg+="ATENÇÃO: container ${c} unhealthy há $(( (NOW - since) / 60 )) min (o Docker não reinicia sozinho)"$'\n'; alerted=1
+    fi
+    new_h+="$c $since ${alerted}"$'\n'
+  done
+  while read -r c _ a; do
+    [ "$a" = 1 ] && ! grep -qx "$c" <<< "$sick" && hmsg+="normalizado: container ${c} não está mais unhealthy"$'\n'
+  done < "$hfile"
+  printf '%s' "$new_h" > "$hfile"
+  [ -n "$hmsg" ] && notify "$hmsg"
 fi
 
 # --- Métricas: 1 linha por minuto, 1 arquivo por dia, retenção RETENTION_DAYS ---
