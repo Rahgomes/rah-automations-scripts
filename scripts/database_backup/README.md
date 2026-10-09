@@ -89,3 +89,16 @@ scripts/database_backup/
   drift_detector.py     Detecta prefixos orfaos no bucket
   notifier.py           Formatacao e envio Telegram
 ```
+
+## Onde roda (desde 09/10/2026)
+
+No próprio servidor, por `rah-backup.timer` (06:00 UTC, `Persistent=true`: se o servidor estava
+desligado no horário, roda ao subir). O serviço passa pela fila `heavy` (1 vCPU, 2G, 90 min) e usa
+venv fixo em `/opt/rah-backup/.venv` (só `boto3` e `requests`). Credenciais em
+`/root/.secrets/database-backup.env` (usuário MinIO `database-backup`, só o bucket `postgres-backups`).
+
+- Instalar ou atualizar o código: `bash scripts/database_backup/host/install.sh`
+- Rodar agora: `systemctl start rah-backup.service` | Log: `journalctl -u rah-backup.service`
+- `imoveis_crawler` fica fora (`PGDATABASES_EXCLUDE`); cópia congelada em `arquivo-congelado/`.
+
+O pipeline do Azure (`database-backup.yml`, definição 5) está desabilitado e fica como plano B.

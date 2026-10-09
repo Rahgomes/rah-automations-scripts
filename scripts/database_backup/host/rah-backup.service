@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup diário do postgres-central para o MinIO (via fila heavy)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# A fila garante que o backup não roda junto com build ou suíte de testes.
+# Teto do job: 1 vCPU, 2G, 90 min ativos.
+ExecStart=/usr/local/bin/heavy -l database-backup -k backup -c 100 -m 2G -t 90 -- /opt/rah-backup/run.sh
+TimeoutStartSec=4h

@@ -1,0 +1,3 @@
+# Só o que o backup importa (scripts/database_backup + scripts/shared).
+boto3>=1.34.0
+requests>=2.31.0

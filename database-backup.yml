@@ -1,3 +1,6 @@
+# DESATIVADO em 09/10/2026: o backup roda no servidor (scripts/database_backup/host,
+# rah-backup.timer, via fila heavy). Definição 5 no Azure com queueStatus=disabled.
+# Mantido como referência e plano B (reativar a definição no Azure).
 name: Database Backup - $(Date:yyyyMMdd)$(Rev:r)
 
 trigger: none

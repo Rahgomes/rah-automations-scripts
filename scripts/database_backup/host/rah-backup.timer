@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup diário às 06:00 UTC (03:00 em São Paulo)
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+# Se o servidor estava desligado às 06:00, roda assim que subir.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
