@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# heavy: fila única para trabalho pesado (build, suíte de testes, install,
+# crawler, backfill). Um job por vez para o servidor inteiro, não importa de
+# qual chat ou terminal veio. Cada job roda num serviço transitório do systemd
+# com teto de CPU, de memória e de tempo, e deixa rastro em jobs.jsonl.
+#
+#   heavy [opções] -- comando [args...]
+#   heavy -s            mostra a fila
+#   heavy -h            ajuda
+#
+# Opções:
+#   -l RÓTULO   projeto (padrão: nome do repositório git ou da pasta)
+#   -k TIPO     test, build, install, crawler, backfill, outro (padrão: deduzido)
+#   -c CPU      teto de CPU em % de 1 vCPU (padrão 100 = 1 vCPU; máx. 200)
+#   -m MEM      teto de memória (padrão 4G)
+#   -t MIN      tempo máximo em minutos (padrão 30); estourou, o job é morto
+#   -u          urgente: vai para a frente da fila (nunca interrompe quem roda)
+#   -q          não acompanha a saída; só enfileira e devolve o id
+set -uo pipefail
+
+HEAVY_HOME=${HEAVY_HOME:-/var/lib/heavy}
+HEAVY_LOG=${HEAVY_LOG:-/var/log/heavy}
+export TS_SOCKET=${TS_SOCKET:-/run/heavy/tsp.sock}
+export TS_MAXFINISHED=${TS_MAXFINISHED:-200}
+export TMPDIR="$HEAVY_LOG/out"
+mkdir -p "$HEAVY_HOME/jobs" "$HEAVY_LOG/out" "$(dirname "$TS_SOCKET")"
+chmod 700 "$HEAVY_HOME"
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+label=""; kind=""; cpu=100; mem=4G; tmin=30; urgent=0; quiet=0
+while getopts "l:k:c:m:t:uqsh" o; do
+  case $o in
+    l) label=$OPTARG;; k) kind=$OPTARG;; c) cpu=$OPTARG;; m) mem=$OPTARG;; t) tmin=$OPTARG;;
+    u) urgent=1;; q) quiet=1;;
+    s) tsp; exit 0;;
+    h) usage; exit 0;;
+    *) usage; exit 2;;
+  esac
+done
+shift $((OPTIND - 1))
+[ "${1:-}" = "--" ] && shift
+[ $# -gt 0 ] || { usage; exit 2; }
+[[ $cpu =~ ^[0-9]+$ ]] && [ "$cpu" -ge 10 ] && [ "$cpu" -le 200 ] || { echo "heavy: -c entre 10 e 200" >&2; exit 2; }
+[[ $tmin =~ ^[0-9]+$ ]] && [ "$tmin" -ge 1 ] || { echo "heavy: -t em minutos" >&2; exit 2; }
+
+if [ -z "$label" ]; then
+  top=$(git rev-parse --show-toplevel 2>/dev/null) && label=$(basename "$top") || label=$(basename "$PWD")
+fi
+if [ -z "$kind" ]; then
+  case " $* " in
+    *vitest*|*pytest*|*" test"*|*jest*|*playwright*) kind=test;;
+    *"docker build"*|*buildx*|*" build"*|*tsc*|*"next build"*) kind=build;;
+    *" install"*|*" ci "*|*"uv sync"*|*"pip "*) kind=install;;
+    *crawl*|*sungrow*|*fusion*|*tecsci*|*puppeteer*|*playwright*) kind=crawler;;
+    *backfill*) kind=backfill;;
+    *) kind=outro;;
+  esac
+fi
+
+# Pasta do job: ambiente e diretório do chamador, para o job rodar igual
+# rodaria aqui. O ambiente pode ter segredos: arquivo 600, apagado no fim.
+jid=$(date -u +%Y%m%d-%H%M%S)-$$
+jdir="$HEAVY_HOME/jobs/$jid"
+mkdir -m 700 "$jdir"
+export -p > "$jdir/env"; chmod 600 "$jdir/env"
+printf '%s' "$PWD" > "$jdir/cwd"
+printf '%q ' "$@" > "$jdir/cmd"
+cat > "$jdir/meta" <<EOF
+label=$(printf %q "$label")
+kind=$kind
+cpu=$cpu
+mem=$mem
+tmin=$tmin
+enqueued=$(date +%s)
+caller=$(printf %q "${HEAVY_CALLER:-$(ps -o comm= -p $PPID 2>/dev/null)}")
+EOF
+
+ahead=$(tsp | awk 'NR>1 && ($2=="running" || $2=="queued")' | wc -l)
+id=$(tsp -L "$label:$kind" heavy-run "$jdir")
+[ "$urgent" = 1 ] && tsp -u "$id" >/dev/null 2>&1
+find "$HEAVY_LOG/out" -type f -mtime +7 -delete 2>/dev/null
+
+if [ "$quiet" = 1 ]; then echo "$id"; exit 0; fi
+if [ "$ahead" -gt 0 ]; then
+  echo "heavy: job $id ($label/$kind) na fila; $ahead na frente. Ver: heavy -s" >&2
+fi
+# Sair daqui (Ctrl+C) não cancela o job: ele segue na fila. Cancelar: tsp -r <id> ou tsp -k <id>.
+trap 'echo "heavy: você saiu, o job $id continua. Ver: heavy -s" >&2; exit 130' INT
+# Espera a vez antes de acompanhar: o tsp só segue a saída de job já iniciado.
+while st=$(tsp -s "$id" 2>/dev/null) && [ "$st" = queued ]; do sleep 2; done
+tsp -t "$id" 2>/dev/null
+tsp -w "$id"
