@@ -1,0 +1,37 @@
+# nome do container        memória   cpus    (medido em 12/10/2026: memória própria + folga; cache não conta)
+postgres-central           2G        2
+minio                      1536M     1.5
+coolify-proxy              512M      2
+mysql-mv0s8b1r4ub1nvbby96qm9v6   1G  1
+kimai-mv0s8b1r4ub1nvbby96qm9v6   512M  1
+chatwoot                   768M      1
+chatwoot-sidekiq           768M      0.5
+chatwoot-redis             128M      0.25
+evolution-api              768M      1
+redis-central              256M      0.5
+y0gkwc84cg848o4g8gsswcsc-014516627673   512M  1
+nexalume-prod              256M      0.5
+planka-lfhc8uf0up6w7fu9ch4w3e0r     512M  1
+postgres-lfhc8uf0up6w7fu9ch4w3e0r   256M  0.5
+portfolio-web              384M      1
+portfolio-api              384M      1
+rah-memory-bot             256M      0.5
+rag-nexalume-api           256M      0.5
+docker-registry            256M      1
+docker-registry-ui         64M       0.25
+coolify-db                 256M      0.5
+coolify-redis              128M      0.25
+coolify-sentinel           128M      0.25
+# parados hoje, já com teto para quando voltarem
+coolify                    1G        1
+coolify-realtime           256M      0.5
+rah-crm-api                768M      1
+rah-crm-web                384M      1
+rah-crm-worker             384M      0.5
+rah-assistente             384M      0.5
+devflash                   256M      0.5
+video-tools                512M      1
+videoinsight               512M      1
+mba-rag                    512M      1
+rah-budget                 384M      1
+buildx_buildkit_limitado0  -  -   # teto no driver-opt do builder (1,5 vCPU, 4G)

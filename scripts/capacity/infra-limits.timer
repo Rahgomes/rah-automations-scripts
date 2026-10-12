@@ -1,0 +1,9 @@
+[Unit]
+Description=infra-limits a cada 10 min (e 2 min após o boot)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

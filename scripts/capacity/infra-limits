@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# infra-limits: garante teto de RAM e CPU em cada container, a partir de uma
+# tabela (/etc/infra-limits.tsv: nome  memória  cpus). docker update vale na
+# hora, mas some quando o container é recriado (deploy do Coolify, compose up);
+# este script roda a cada 10 min e reaplica o que faltar. Container fora da
+# tabela é listado no log como "sem limite"; "-" na memória = teto definido
+# em outro lugar.
+#   infra-limits           aplica o que faltar
+#   infra-limits --check   só mostra, não muda nada
+set -uo pipefail
+TABLE=${INFRA_LIMITS:-/etc/infra-limits.tsv}
+check=0; [ "${1:-}" = "--check" ] && check=1
+[ -r "$TABLE" ] || { echo "infra-limits: falta $TABLE" >&2; exit 1; }
+declare -A mem cpu
+while read -r n m c _; do
+  case $n in ''|\#*) continue;; esac
+  # "-": teto definido em outro lugar (ex.: builder buildx com driver-opt); só não avisar
+  [ "$m" = "-" ] && { mem[$n]=skip; continue; }
+  mem[$n]=$(numfmt --from=iec "${m^^}" 2>/dev/null) || { echo "memória inválida: $n $m" >&2; continue; }
+  cpu[$n]=$(awk -v c="$c" 'BEGIN{printf "%d", c*1e9}')
+done < "$TABLE"
+changed=0; missing=""
+# Um docker inspect para todos os containers (não um por container).
+while IFS='|' read -r name curm curc; do
+  name=${name#/}
+  if [ -z "${mem[$name]:-}" ]; then missing+="$name "; continue; fi
+  [ "${mem[$name]}" = skip ] && continue
+  [ "$curm" = "${mem[$name]}" ] && [ "$curc" = "${cpu[$name]}" ] && continue
+  echo "infra-limits: $name RAM $((curm/1048576))→$((mem[$name]/1048576)) MB, CPU $(awk -v c=$curc 'BEGIN{print c/1e9}')→$(awk -v c=${cpu[$name]} 'BEGIN{print c/1e9}')"
+  [ "$check" = 1 ] && continue
+  docker update --memory "${mem[$name]}" --memory-swap -1 --cpus "$(awk -v c=${cpu[$name]} 'BEGIN{print c/1e9}')" "$name" >/dev/null && changed=$((changed+1))
+done < <(docker inspect -f '{{.Name}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}' $(docker ps -q))
+[ -n "$missing" ] && echo "infra-limits: sem limite na tabela: $missing"
+[ "$changed" -gt 0 ] && echo "infra-limits: $changed container(s) ajustado(s)"
+exit 0

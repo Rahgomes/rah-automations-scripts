@@ -1,0 +1,10 @@
+[Unit]
+Description=infra-limits: reaplica teto de RAM e CPU nos containers
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/infra-limits
+Nice=10
+CPUQuota=20%
+TimeoutStartSec=120
