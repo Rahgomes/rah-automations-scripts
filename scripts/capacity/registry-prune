@@ -11,7 +11,9 @@ Azure com job aberto pode estar empurrando imagem): espera até 45 min e, se nã
 para a próxima rodada. Sem --delete-untagged de propósito: ele apaga as plataformas de uma
 imagem multi-arquitetura.
 
-Uso: registry-prune [--apply] [--config ARQ] [--quiet]
+Uso: registry-prune [--apply] [--orphans] [--config ARQ] [--quiet]
+  --orphans (ou PRUNE_ORPHANS=1): também apaga manifestos que nenhuma tag que ficou alcança (filhos
+  de índice multi-arquitetura e `latest` sobrescrita). Só em registry com disco local.
 Ambiente (ou /etc/registry-prune.env; ENV_FILES lista outros .env a ler): REGISTRY_URL (ou REGISTRY_CONTAINER para achar o IP), REGISTRY_USER/PASSWORD,
           PROTECT_TAGS (regex), SERVER_NAME, TELEGRAM_BOT_TOKEN/CHAT_ID, PRUNE_LOG.
 """
@@ -208,9 +210,64 @@ def freed_estimate(result):
     return sum(size for digest, size in dropped.items() if digest not in kept)
 
 
+# ------------------------------------------------------------------ manifestos soltos
+REVISIONS = "/var/lib/registry/docker/registry/v2/repositories/{repo}/_manifests/revisions/sha256"
+
+
+def revisions(repo):
+    """Digests de todos os manifestos guardados no repositório (só registry em disco local; em S3
+    o `ls` falha e a lista volta vazia, e nada é mexido)."""
+    container = os.environ.get("REGISTRY_CONTAINER", "docker-registry")
+    out = subprocess.run(["docker", "exec", container, "ls", REVISIONS.format(repo=repo)],
+                         capture_output=True, text=True, timeout=120)
+    if out.returncode != 0:
+        return []
+    return [f"sha256:{d}" for d in out.stdout.split() if re.fullmatch(r"[0-9a-f]{64}", d)]
+
+
+def reachable(repo, digests, seen):
+    """O próprio digest e todos os filhos (plataformas e atestados de um índice)."""
+    out = set()
+    for digest in digests:
+        if digest in seen:
+            continue
+        seen.add(digest)
+        out.add(digest)
+        try:
+            _, data = manifest(repo, digest)
+        except urllib.error.HTTPError:
+            continue
+        out |= reachable(repo, [c["digest"] for c in data.get("manifests") or []], seen)
+    return out
+
+
+def orphans(result, used):
+    """Manifestos que nenhuma tag que ficou alcança e que nenhum container usa: sobra de imagem
+    multi-arquitetura (o índice saiu, os filhos não) ou de tag sobrescrita (latest)."""
+    out = []
+    for item in result:
+        repo = item["repo"]
+        kept = [digest for digest, _, _ in item["stay"]]
+        keep = reachable(repo, kept, set()) | {d for r, d in used if r == repo}
+        out += [(repo, d) for d in revisions(repo) if d not in keep]
+    return out
+
+
 # ------------------------------------------------------------------ garbage-collect
 def pipeline_busy():
-    return subprocess.run(["pgrep", "-f", "Agent.Worker"], capture_output=True).returncode == 0
+    """Agente do Azure com job aberto (aqui) ou envio de imagem em andamento no próprio registry
+    (vale para quem recebe de fora, como a AYA pelo GitHub Actions): upload aberto há menos de
+    1 h em `_uploads`. No registry em S3 a pasta não existe e a checagem volta vazia."""
+    if subprocess.run(["pgrep", "-f", "Agent.Worker"], capture_output=True).returncode == 0:
+        return True
+    container = os.environ.get("REGISTRY_CONTAINER", "docker-registry")
+    found = subprocess.run(
+        ["docker", "exec", container, "sh", "-c",
+         "find /var/lib/registry/docker/registry/v2/repositories -path '*/_uploads/*' "
+         "-mmin -60 2>/dev/null | head -1"],
+        capture_output=True, text=True, timeout=120,
+    ).stdout.strip()
+    return bool(found)
 
 
 def garbage_collect():
@@ -236,7 +293,9 @@ def telegram(text, level="info"):
     """Pelo `notify` quando instalado (Telegram + Operação › Avisos no CRM); senão, direto."""
     if os.path.exists("/usr/local/bin/notify"):
         try:
-            subprocess.run(["/usr/local/bin/notify", "-n", level, "-o", "registry-prune", "--", text],
+            client = os.environ.get("NOTIFY_CLIENT")
+            subprocess.run(["/usr/local/bin/notify", "-n", level, "-o", "registry-prune",
+                            *(["-c", client] if client else []), "--", text],
                            timeout=30, check=False)
             return
         except (OSError, subprocess.SubprocessError):
@@ -272,6 +331,8 @@ def main(argv):
     _, catalog = get_json("/v2/_catalog?n=1000", "application/json")
     result = plan(catalog.get("repositories") or [], load_keep(config), protect_re, in_use())
     freed = freed_estimate(result)
+    used_now = in_use()
+    loose = orphans(result, used_now) if "--orphans" in argv or os.environ.get("PRUNE_ORPHANS") else []
 
     total_drop = sum(len(r["drop"]) for r in result)
     for item in result:
@@ -281,16 +342,21 @@ def main(argv):
         log(f"{item['repo']:<22} fica {len(item['stay']):>3}  sai {len(item['drop']):>3}"
             f"  (manter {item['keep']}{'; também ' + held if held else ''})")
     log(f"total: sai {total_drop} imagem(ns), libera cerca de {gib(freed)}")
+    if loose:
+        log(f"manifestos soltos (sem tag que os alcance): {len(loose)}")
 
     deleted, errors, blobs = 0, [], None
-    if apply and total_drop:
-        for item in result:
-            for digest, _, _ in item["drop"]:
-                try:
-                    call("DELETE", f"/v2/{item['repo']}/manifests/{digest}")
-                    deleted += 1
-                except urllib.error.HTTPError as err:
-                    errors.append(f"{item['repo']}: HTTP {err.code}")
+    if apply and (total_drop or loose):
+        targets = [(item["repo"], digest) for item in result for digest, _, _ in item["drop"]]
+        drop_set = set(targets)
+        targets += [pair for pair in loose if pair not in drop_set]
+        for repo, digest in targets:
+            try:
+                call("DELETE", f"/v2/{repo}/manifests/{digest}")
+                deleted += 1
+            except urllib.error.HTTPError as err:
+                if err.code != 404:  # já tinha saído junto com o índice
+                    errors.append(f"{repo}: HTTP {err.code}")
         blobs = garbage_collect()
         if blobs is None:
             log("garbage-collect adiado: pipeline rodando há 45 min; o espaço sai na próxima rodada")
@@ -298,8 +364,8 @@ def main(argv):
     record = {
         "at": datetime.now(UTC).isoformat(timespec="seconds"), "server": server,
         "apply": apply, "repos": len(result), "deleted": deleted if apply else 0,
-        "planned": total_drop, "freed_bytes": freed if apply and deleted else 0,
-        "estimate_bytes": freed, "gc_blobs": blobs, "gc_skipped": apply and total_drop > 0
+        "planned": total_drop, "orphans": len(loose), "freed_bytes": freed if apply and deleted else 0,
+        "estimate_bytes": freed, "gc_blobs": blobs, "gc_skipped": apply and deleted > 0
         and blobs is None, "errors": errors[:10], "duration_s": round(time.time() - started),
     }
     if apply:

@@ -1,0 +1,14 @@
+# Variante para servidor sem a fila `heavy` (VPS da AYA): o teto vai direto no systemd.
+# Instalar como /etc/systemd/system/registry-prune.service.
+[Unit]
+Description=Limpeza do registry Docker: guarda as últimas imagens de cada projeto
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/registry-prune --apply --quiet
+CPUQuota=50%
+MemoryMax=512M
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3h

@@ -51,3 +51,10 @@ pela API e roda o garbage-collect (espera o agente do Azure ficar livre, até 45
 - Rodar já: `systemctl start registry-prune` (vai pela fila `heavy`)
 - Timer semanal, domingo 05:30. Registro em `/var/log/registry-prune.jsonl`.
 - 1ª rodada (17/10/2026): 116 imagens, 12 GiB → 4,8 GiB, 11 min, 1,3 s de CPU, 21 MB de RAM.
+- `--orphans` (ou `PRUNE_ORPHANS=1` no `/etc/registry-prune.env`): apaga também manifestos que nenhuma
+  tag que ficou alcança. Necessário no registry em disco local que recebe imagem do buildx
+  (índice + plataforma + atestado): apagar o índice deixa os filhos soltos e o garbage-collect não
+  os pega. Em S3 (o nosso) a listagem não existe e o passo é pulado.
+- VPS da AYA (17/10/2026): sem fila `heavy`, unidade `registry-prune-sem-fila.service`; 277 imagens +
+  853 manifestos soltos, volume 7,5 GB → 687 MB, 357 blobs das 23 imagens mantidas conferidos.
+  Para de enviar novos envios enquanto houver upload aberto em `_uploads` (GitHub Actions).
