@@ -68,7 +68,8 @@ result=$(field "Finished with result")
 # Morto pelo vigia do job: rc 124, como o timeout(1), para quem chamou não achar que passou.
 [ -f "$jdir/timeout" ] && { result=timeout; rc=124; }
 cpu_ms=$(field "CPU time consumed" | to_ms)
-mem_mb=$(( $(cat "$jdir/peak" 2>/dev/null || echo 0) / 1048576 ))
+# o arquivo pode existir vazio (job curto, sem amostra): vazio conta como 0
+peak=$(cat "$jdir/peak" 2>/dev/null); mem_mb=$(( ${peak:-0} / 1048576 ))
 # Morto por memória antes da 1ª amostra: o pico foi o próprio teto.
 [ "$result" = oom-kill ] && [ "$mem_mb" -eq 0 ] && mem_mb=$(numfmt --from=iec "$mem" 2>/dev/null | awk '{printf "%d", $1/1048576}')
 echo "heavy: fim $(date -u +%T) UTC | ${result:-?} rc=$rc | $((end - start)) s | CPU ${cpu_ms:-0} ms | RAM pico ${mem_mb:-0} MB" >&2
@@ -76,7 +77,8 @@ echo "heavy: fim $(date -u +%T) UTC | ${result:-?} rc=$rc | $((end - start)) s |
 [ "$result" = oom-kill ] && echo "heavy: estourou a memória ($mem) e foi morto" >&2
 
 # Rastro: uma linha por job. O comando vai cortado para não carregar segredo.
-esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n' | cut -c1-160; }
+# Corta ANTES de escapar: cortar depois pode partir um \\ ou \" ao meio e quebrar o JSON.
+esc() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 printf '{"inicio":%d,"fim":%d,"espera_s":%d,"duracao_s":%d,"projeto":"%s","tipo":"%s","cpu_ms":%s,"cpu_media_pct":%s,"ram_pico_mb":%s,"teto_cpu_pct":%s,"teto_ram":"%s","resultado":"%s","rc":%d,"origem":"%s","pasta":"%s","comando":"%s"}\n' \
   "$start" "$end" "$((start - enqueued))" "$((end - start))" "$(esc "$label")" "$kind" \
   "${cpu_ms:-0}" "$(( ${cpu_ms:-0} / 10 / ( (end - start) > 0 ? (end - start) : 1 ) ))" "${mem_mb:-0}" \

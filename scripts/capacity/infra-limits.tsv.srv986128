@@ -35,3 +35,4 @@ videoinsight               512M      1
 mba-rag                    512M      1
 rah-budget                 384M      1
 buildx_buildkit_limitado0  -  -   # teto no driver-opt do builder (1,5 vCPU, 4G)
+vaultwarden                256M      0.5
