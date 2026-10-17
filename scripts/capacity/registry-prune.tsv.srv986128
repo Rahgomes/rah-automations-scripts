@@ -1,0 +1,12 @@
+# registry-prune: quantas imagens guardar por repositório (as mais novas).
+# Além delas ficam sempre as tags fixas (latest, prod, manual...) e o que algum container usa.
+# repositório           manter
+*                       5
+# rah-crm faz ~10 builds por dia: 10 dá folga para voltar versão
+rah-crm-api             10
+rah-crm-web             10
+# congelados: só a última, para poder voltar
+sitecloner              1
+real-estate-crawler     1
+# imagem de teste do registry
+test-image              0

@@ -39,3 +39,15 @@ lugar. Container fora da tabela aparece no log como "sem limite".
 Como dimensionar: memória **própria** do processo (`anon` em `memory.stat`) com folga de 2x ou mais; o
 `memory.peak` inclui cache de disco, que o kernel devolve, e engana (o MinIO marcava 10 GB de pico com
 161 MB próprios). A tabela do srv986128 está em `infra-limits.tsv.srv986128`.
+
+## registry-prune (limpeza do registry Docker)
+
+Guarda por repositório as N imagens mais novas (`/etc/registry-prune.tsv`; linha `*` é o padrão),
+as tags fixas (latest, prod, manual...) e tudo que algum container do servidor usa. Apaga o resto
+pela API e roda o garbage-collect (espera o agente do Azure ficar livre, até 45 min). Sem
+`--delete-untagged`, que quebra imagem multi-arquitetura.
+
+- Plano sem apagar: `registry-prune`
+- Rodar já: `systemctl start registry-prune` (vai pela fila `heavy`)
+- Timer semanal, domingo 05:30. Registro em `/var/log/registry-prune.jsonl`.
+- 1ª rodada (17/10/2026): 116 imagens, 12 GiB → 4,8 GiB, 11 min, 1,3 s de CPU, 21 MB de RAM.

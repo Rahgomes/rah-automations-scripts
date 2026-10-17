@@ -1,0 +1,9 @@
+[Unit]
+Description=Limpeza do registry Docker: guarda as últimas imagens de cada projeto (via fila heavy)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Pela fila: não roda junto com build ou suíte de testes. Teto: meio vCPU, 512M, 60 min ativos.
+ExecStart=/usr/local/bin/heavy -l registry-prune -k manutencao -c 50 -m 512M -t 60 -- /usr/local/bin/registry-prune --apply --quiet
+TimeoutStartSec=3h

@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""registry-prune — apaga imagens antigas do registry Docker, guardando as últimas de cada projeto.
+
+Cada build do pipeline empurra uma tag nova e nada apaga as velhas. Este script guarda, por
+repositório, as N imagens mais novas (tabela /etc/registry-prune.tsv, linha `*` é o padrão), as
+tags fixas (latest, prod, manual...) e toda imagem que algum container deste servidor usa,
+rodando ou parado. O resto sai pela API do registry e o garbage-collect libera o espaço.
+
+Sem --apply só mostra o plano. O garbage-collect não roda com pipeline no meio (o agente do
+Azure com job aberto pode estar empurrando imagem): espera até 45 min e, se não liberar, deixa
+para a próxima rodada. Sem --delete-untagged de propósito: ele apaga as plataformas de uma
+imagem multi-arquitetura.
+
+Uso: registry-prune [--apply] [--config ARQ] [--quiet]
+Ambiente (ou /etc/registry-prune.env; ENV_FILES lista outros .env a ler): REGISTRY_URL (ou REGISTRY_CONTAINER para achar o IP), REGISTRY_USER/PASSWORD,
+          PROTECT_TAGS (regex), SERVER_NAME, TELEGRAM_BOT_TOKEN/CHAT_ID, PRUNE_LOG.
+"""
+
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import UTC, datetime
+
+ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+INDEXES = ("application/vnd.oci.image.index.v1+json",
+           "application/vnd.docker.distribution.manifest.list.v2+json")
+DEFAULT_KEEP = 5
+GC_WAIT_S = 45 * 60
+
+
+def load_env(path):
+    """KEY=valor de um .env (sem sobrescrever o que já veio do ambiente). A fila heavy roda o
+    job fora do ambiente do systemd, então o script lê os arquivos ele mesmo."""
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
+def log(msg):
+    if not QUIET:
+        print(msg, flush=True)
+
+
+# ------------------------------------------------------------------ registry
+def registry_url():
+    url = os.environ.get("REGISTRY_URL")
+    if url:
+        return url.rstrip("/")
+    name = os.environ.get("REGISTRY_CONTAINER", "docker-registry")
+    ip = subprocess.run(
+        ["docker", "inspect", name, "--format",
+         "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.split()[0]
+    return f"http://{ip}:5000"
+
+
+def _auth():
+    user, pwd = os.environ.get("REGISTRY_USER"), os.environ.get("REGISTRY_PASSWORD")
+    if not user:
+        return {}
+    return {"Authorization": "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode()}
+
+
+def call(method, path, accept=ACCEPT):
+    req = urllib.request.Request(BASE + path, method=method,
+                                 headers={"Accept": accept, **_auth()})
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 (URL do próprio registry)
+        return resp.headers, resp.read()
+
+
+def get_json(path, accept=ACCEPT):
+    headers, body = call("GET", path, accept)
+    return headers, json.loads(body or b"{}")
+
+
+def tags_of(repo):
+    _, data = get_json(f"/v2/{repo}/tags/list?n=10000", "application/json")
+    return data.get("tags") or []
+
+
+def manifest(repo, ref):
+    headers, data = get_json(f"/v2/{repo}/manifests/{ref}")
+    return headers.get("Docker-Content-Digest"), data
+
+
+def created_at(repo, data):
+    """Data de criação da imagem (do config); num índice, a da 1ª plataforma."""
+    if data.get("mediaType") in INDEXES or "manifests" in data:
+        children = data.get("manifests") or []
+        if not children:
+            return ""
+        _, data = manifest(repo, children[0]["digest"])
+    config = (data.get("config") or {}).get("digest")
+    if not config:
+        return ""
+    _, blob = get_json(f"/v2/{repo}/blobs/{config}", "*/*")
+    return blob.get("created", "")
+
+
+def blobs_of(repo, data, seen):
+    """Camadas e config (digest -> tamanho) de um manifesto, descendo nos índices."""
+    out = {}
+    for child in data.get("manifests") or []:
+        if child["digest"] in seen:
+            continue
+        seen.add(child["digest"])
+        _, sub = manifest(repo, child["digest"])
+        out.update(blobs_of(repo, sub, seen))
+    for item in [data.get("config") or {}] + (data.get("layers") or []):
+        if item.get("digest"):
+            out[item["digest"]] = item.get("size", 0)
+    return out
+
+
+# ------------------------------------------------------------------ o que proteger
+def in_use():
+    """Digests (repo, digest) das imagens que algum container deste servidor usa."""
+    if os.environ.get("SKIP_LOCAL_CONTAINERS"):
+        return set()
+    ids = subprocess.run(["docker", "ps", "-aq"], capture_output=True, text=True,
+                         check=True, timeout=30).stdout.split()
+    if not ids:
+        return set()
+    images = subprocess.run(["docker", "inspect", "--format", "{{.Image}}", *ids],
+                            capture_output=True, text=True, check=True, timeout=60).stdout.split()
+    raw = subprocess.run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}",
+                          *sorted(set(images))],
+                         capture_output=True, text=True, timeout=60).stdout.splitlines()
+    out = set()
+    for line in raw:
+        for ref in json.loads(line or "[]") or []:
+            name, _, digest = ref.partition("@")
+            out.add((name.split("/", 1)[-1], digest))
+    return out
+
+
+def load_keep(path):
+    keep = {"*": DEFAULT_KEEP}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split("#", 1)[0].split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    keep[parts[0]] = int(parts[1])
+    except FileNotFoundError:
+        pass
+    return keep
+
+
+# ------------------------------------------------------------------ plano
+def plan(repos, keep, protect_re, used):
+    """Por repositório: o que fica e o que sai. Digest compartilhado por tag que fica, fica."""
+    result = []
+    for repo in repos:
+        by_digest = {}
+        for tag in tags_of(repo):
+            try:
+                digest, data = manifest(repo, tag)
+            except urllib.error.HTTPError:
+                continue
+            entry = by_digest.setdefault(digest, {"tags": [], "data": data})
+            entry["tags"].append(tag)
+        for digest, entry in by_digest.items():
+            entry["created"] = created_at(repo, entry["data"])
+        ordered = sorted(by_digest, key=lambda d: by_digest[d]["created"], reverse=True)
+        limit = keep.get(repo, keep["*"])
+        stay, drop = [], []
+        for pos, digest in enumerate(ordered):
+            entry = by_digest[digest]
+            reason = ("recente" if pos < limit else
+                      "tag fixa" if any(protect_re.fullmatch(t) for t in entry["tags"]) else
+                      "em uso" if (repo, digest) in used else None)
+            (stay if reason else drop).append((digest, entry, reason))
+        result.append({"repo": repo, "keep": limit, "stay": stay, "drop": drop})
+    return result
+
+
+def freed_estimate(result):
+    kept, dropped = {}, {}
+    for item in result:
+        repo = item["repo"]
+        for target, rows in ((kept, item["stay"]), (dropped, item["drop"])):
+            for _, entry, _ in rows:
+                target.update(blobs_of(repo, entry["data"], set()))
+    return sum(size for digest, size in dropped.items() if digest not in kept)
+
+
+# ------------------------------------------------------------------ garbage-collect
+def pipeline_busy():
+    return subprocess.run(["pgrep", "-f", "Agent.Worker"], capture_output=True).returncode == 0
+
+
+def garbage_collect():
+    container = os.environ.get("REGISTRY_CONTAINER", "docker-registry")
+    waited = 0
+    while pipeline_busy():
+        if waited >= GC_WAIT_S:
+            return None
+        time.sleep(60)
+        waited += 60
+    out = subprocess.run(
+        ["docker", "exec", container, "registry", "garbage-collect",
+         "/etc/docker/registry/config.yml"],
+        capture_output=True, text=True, timeout=3600,
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"garbage-collect falhou: {out.stderr.strip()[-300:]}")
+    return len(re.findall(r"^blob eligible for deletion", out.stdout, re.M))
+
+
+# ------------------------------------------------------------------ aviso
+def telegram(text):
+    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        return
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+    try:
+        urllib.request.urlopen(  # noqa: S310
+            f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=10)
+    except OSError:
+        pass
+
+
+def gib(n):
+    return f"{n / 1024**3:.1f} GiB" if n >= 1024**3 else f"{n / 1024**2:.0f} MiB"
+
+
+def main(argv):
+    global BASE, QUIET
+    load_env(os.environ.get("PRUNE_ENV", "/etc/registry-prune.env"))
+    for extra in os.environ.get("ENV_FILES", "").split():
+        load_env(extra)
+    apply = "--apply" in argv
+    QUIET = "--quiet" in argv
+    config = argv[argv.index("--config") + 1] if "--config" in argv else "/etc/registry-prune.tsv"
+    server = os.environ.get("SERVER_NAME", os.uname().nodename)
+    protect_re = re.compile(os.environ.get(
+        "PROTECT_TAGS", r"latest|manual|prod|main|master|stable|dev"))
+    started = time.time()
+    BASE = registry_url()
+    _, catalog = get_json("/v2/_catalog?n=1000", "application/json")
+    result = plan(catalog.get("repositories") or [], load_keep(config), protect_re, in_use())
+    freed = freed_estimate(result)
+
+    total_drop = sum(len(r["drop"]) for r in result)
+    for item in result:
+        if not item["drop"] and not item["stay"]:
+            continue
+        held = ", ".join(sorted({why for _, _, why in item["stay"] if why != "recente"}))
+        log(f"{item['repo']:<22} fica {len(item['stay']):>3}  sai {len(item['drop']):>3}"
+            f"  (manter {item['keep']}{'; também ' + held if held else ''})")
+    log(f"total: sai {total_drop} imagem(ns), libera cerca de {gib(freed)}")
+
+    deleted, errors, blobs = 0, [], None
+    if apply and total_drop:
+        for item in result:
+            for digest, _, _ in item["drop"]:
+                try:
+                    call("DELETE", f"/v2/{item['repo']}/manifests/{digest}")
+                    deleted += 1
+                except urllib.error.HTTPError as err:
+                    errors.append(f"{item['repo']}: HTTP {err.code}")
+        blobs = garbage_collect()
+        if blobs is None:
+            log("garbage-collect adiado: pipeline rodando há 45 min; o espaço sai na próxima rodada")
+
+    record = {
+        "at": datetime.now(UTC).isoformat(timespec="seconds"), "server": server,
+        "apply": apply, "repos": len(result), "deleted": deleted if apply else 0,
+        "planned": total_drop, "freed_bytes": freed if apply and deleted else 0,
+        "estimate_bytes": freed, "gc_blobs": blobs, "gc_skipped": apply and total_drop > 0
+        and blobs is None, "errors": errors[:10], "duration_s": round(time.time() - started),
+    }
+    if apply:
+        with open(os.environ.get("PRUNE_LOG", "/var/log/registry-prune.jsonl"), "a",
+                  encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if deleted or errors:
+            nivel = "⚠️" if errors or record["gc_skipped"] else "🧹"
+            telegram(f"{nivel} Registry {server}: {deleted} imagem(ns) antiga(s) apagada(s), "
+                     f"~{gib(freed)} liberados"
+                     + (f"; {len(errors)} erro(s)" if errors else "")
+                     + ("; limpeza do disco adiada (pipeline rodando)"
+                        if record["gc_skipped"] else ""))
+    return 1 if errors else 0
+
+
+BASE = ""
+QUIET = False
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception as err:  # noqa: BLE001 (o aviso precisa sair mesmo em erro inesperado)
+        if "--apply" in sys.argv:
+            telegram(f"❌ Registry {os.environ.get('SERVER_NAME', '')}: limpeza falhou: "
+                     f"{type(err).__name__}: {str(err)[:200]}")
+        raise
