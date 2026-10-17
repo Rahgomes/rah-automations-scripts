@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 command -v tsp >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq task-spooler
-install -m 755 infra-watch infra-snapshot heavy heavy-run infra-limits registry-prune /usr/local/bin/
-mkdir -p /var/lib/heavy /var/log/heavy/out && chmod 700 /var/lib/heavy
+install -m 755 infra-watch infra-snapshot heavy heavy-run infra-limits registry-prune notify /usr/local/bin/
+mkdir -p /var/lib/heavy /var/log/heavy/out /var/lib/notify && chmod 700 /var/lib/heavy /var/lib/notify
 install -m 644 infra-watch.service infra-watch.timer infra-limits.service infra-limits.timer registry-prune.service registry-prune.timer /etc/systemd/system/
 [ -f /etc/infra-watch.env ] || install -m 600 infra-watch.env.example /etc/infra-watch.env
 # Builder com teto para docker build (o BuildKit roda fora de qualquer cota de serviço).

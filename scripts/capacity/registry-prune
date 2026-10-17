@@ -232,7 +232,15 @@ def garbage_collect():
 
 
 # ------------------------------------------------------------------ aviso
-def telegram(text):
+def telegram(text, level="info"):
+    """Pelo `notify` quando instalado (Telegram + Operação › Avisos no CRM); senão, direto."""
+    if os.path.exists("/usr/local/bin/notify"):
+        try:
+            subprocess.run(["/usr/local/bin/notify", "-n", level, "-o", "registry-prune", "--", text],
+                           timeout=30, check=False)
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
     token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat:
         return
@@ -299,12 +307,13 @@ def main(argv):
                   encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         if deleted or errors:
-            nivel = "⚠️" if errors or record["gc_skipped"] else "🧹"
+            warn = bool(errors or record["gc_skipped"])
+            nivel = "⚠️" if warn else "🧹"
             telegram(f"{nivel} Registry {server}: {deleted} imagem(ns) antiga(s) apagada(s), "
                      f"~{gib(freed)} liberados"
                      + (f"; {len(errors)} erro(s)" if errors else "")
                      + ("; limpeza do disco adiada (pipeline rodando)"
-                        if record["gc_skipped"] else ""))
+                        if record["gc_skipped"] else ""), "warn" if warn else "info")
     return 1 if errors else 0
 
 
@@ -317,5 +326,5 @@ if __name__ == "__main__":
     except Exception as err:  # noqa: BLE001 (o aviso precisa sair mesmo em erro inesperado)
         if "--apply" in sys.argv:
             telegram(f"❌ Registry {os.environ.get('SERVER_NAME', '')}: limpeza falhou: "
-                     f"{type(err).__name__}: {str(err)[:200]}")
+                     f"{type(err).__name__}: {str(err)[:200]}", "crit")
         raise

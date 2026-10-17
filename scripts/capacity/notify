@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# notify — manda um aviso para o Telegram e grava no spool que o CRM lê (Operação › Avisos).
+#
+# Uso: notify [-n info|warn|crit] [-o origem] [-c cliente] [-t título] [--canal rah|aya]
+#             [--html] [--dry-run] "texto"
+#   -n  nível (padrão info)          -o  quem avisa: backup, vigia, coletor-sungrow... (padrão: nome do script)
+#   -c  cliente (ex.: aya)           -t  título curto (padrão: 1ª linha do texto)
+#   --canal  rah = /root/.secrets/telegram.env (padrão); aya = /root/.secrets/aya-telegram.env
+#            Sem --canal e com TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID no ambiente, usa esses (é o caso
+#            do vigia na VPS da AYA, que lê o bot da AYA do /etc/infra-watch.env).
+#   --html   o texto vai ao Telegram com parse_mode=HTML (no CRM as tags saem)
+#
+# Grava o aviso mesmo se o Telegram falhar e SEMPRE sai 0: avisar nunca derruba quem chamou.
+# Spool: /var/lib/notify/events.jsonl (600); passou de 5 MB, fica o último 1 MB.
+set -u
+SPOOL_DIR=${NOTIFY_SPOOL_DIR:-/var/lib/notify}
+SPOOL="$SPOOL_DIR/events.jsonl"
+level=info origin="" client="" title="" canal="" html=0 dry=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) level=${2:-info}; shift 2 ;;
+    -o) origin=${2:-}; shift 2 ;;
+    -c) client=${2:-}; shift 2 ;;
+    -t) title=${2:-}; shift 2 ;;
+    --canal) canal=${2:-rah}; shift 2 ;;
+    --html) html=1; shift ;;
+    --dry-run) dry=1; shift ;;
+    --) shift; break ;;
+    -*) echo "notify: opção desconhecida $1" >&2; shift ;;
+    *) break ;;
+  esac
+done
+text=${*:-}
+[ -n "$text" ] || [ -n "$title" ] || { echo "notify: sem texto" >&2; exit 0; }
+
+case "$level" in info|warn|crit) ;; *) level=info ;; esac
+[ -n "$origin" ] || origin=$(basename "$(ps -o args= -p "$PPID" 2>/dev/null | awk '{print $2 ~ /^\// ? $2 : $1}')" 2>/dev/null)
+# rótulos que o CRM aceita: minúsculas, números, - _ .
+norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_.-' '-' | sed 's/^[^a-z0-9]*//' | cut -c1-"$2"; }
+origin=$(norm "$origin" 40); [ -n "$origin" ] || origin=script
+client=$(norm "$client" 32)
+plain=$(printf '%s' "$text" | sed 's/<[^>]*>//g')
+[ -n "$title" ] || title=$(printf '%s\n' "$plain" | sed '/^[[:space:]]*$/d' | head -1)
+title=$(printf '%s' "$title" | sed 's/<[^>]*>//g' | tr '\n\t' '  ' | cut -c1-200)
+
+# --- Telegram (como os scripts já faziam)
+tg=sem_canal
+token="" chat=""
+if [ -z "$canal" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+  token=$TELEGRAM_BOT_TOKEN chat=$TELEGRAM_CHAT_ID
+else
+  case "${canal:-rah}" in
+    aya) envf=/root/.secrets/aya-telegram.env; tok_var=AYA_TELEGRAM_BOT_TOKEN; chat_var=AYA_TELEGRAM_CHAT_ID ;;
+    *)   envf=/root/.secrets/telegram.env; tok_var=TELEGRAM_BOT_TOKEN; chat_var=TELEGRAM_CHAT_ID ;;
+  esac
+  token=$(grep -m1 "^${tok_var}=" "$envf" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"'')
+  chat=$(grep -m1 "^${chat_var}=" "$envf" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"'')
+fi
+if [ "$dry" = 1 ]; then
+  tg=sem_canal
+elif [ -n "$token" ] && [ -n "$chat" ]; then
+  args=(--data-urlencode "chat_id=$chat" --data-urlencode "text=$text")
+  [ "$html" = 1 ] && args+=(-d parse_mode=HTML)
+  if timeout 15 curl -fsS -o /dev/null "https://api.telegram.org/bot${token}/sendMessage" "${args[@]}" 2>/dev/null; then
+    tg=ok
+  else
+    tg=falhou
+  fi
+fi
+
+# --- spool (JSON montado pelo python: escapa tudo certo)
+line=$(LEVEL=$level ORIGIN=$origin CLIENT=$client TITLE=$title TEXT=$plain TG=$tg python3 -c '
+import json, os
+from datetime import datetime, timezone
+e = os.environ
+print(json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    "level": e["LEVEL"], "origin": e["ORIGIN"], "client": e["CLIENT"] or None,
+    "title": e["TITLE"] or e["ORIGIN"], "text": e["TEXT"][:2000] or None,
+    "telegram": e["TG"]}, ensure_ascii=False))' 2>/dev/null)
+if [ "$dry" = 1 ]; then printf '%s\n' "$line"; exit 0; fi
+[ -n "$line" ] || exit 0
+{
+  mkdir -p "$SPOOL_DIR" && chmod 700 "$SPOOL_DIR"
+  exec 9>>"$SPOOL"
+  chmod 600 "$SPOOL"
+  flock -w 5 9 || exit 0
+  printf '%s\n' "$line" >&9
+  size=$(stat -c %s "$SPOOL" 2>/dev/null || echo 0)
+  if [ "$size" -gt 5242880 ]; then
+    tail -c 1048576 "$SPOOL" | tail -n +2 > "$SPOOL.tmp" && cat "$SPOOL.tmp" > "$SPOOL" && rm -f "$SPOOL.tmp"
+  fi
+} 2>/dev/null
+exit 0

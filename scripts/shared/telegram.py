@@ -1,5 +1,7 @@
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import requests
@@ -22,8 +24,30 @@ def _api_url(method: str) -> str:
     return TELEGRAM_API_URL.format(token=token, method=method)
 
 
-def send_text_message(text: str, parse_mode: str = "HTML") -> bool:
-    """Send a text message to Telegram."""
+def _via_notify(text: str, parse_mode: str, level: str) -> bool | None:
+    """Com NOTIFY_ORIGIN no ambiente e o comando `notify` no servidor, o aviso vai por ele:
+    mesmo Telegram, e fica registrado no CRM (Operação › Avisos). None = seguir pelo caminho
+    antigo (pipelines do Azure, máquina sem o `notify`)."""
+    origin = os.environ.get("NOTIFY_ORIGIN")
+    notify = shutil.which("notify")
+    if not origin or not notify:
+        return None
+    args = [notify, "-n", level, "-o", origin]
+    if parse_mode == "HTML":
+        args.append("--html")
+    try:
+        subprocess.run([*args, "--", text], timeout=30, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.error("notify falhou, indo direto ao Telegram: %s", e)
+        return None
+    return True
+
+
+def send_text_message(text: str, parse_mode: str = "HTML", level: str = "info") -> bool:
+    """Send a text message to Telegram (pelo `notify`, quando houver; ver _via_notify)."""
+    sent = _via_notify(text, parse_mode, level)
+    if sent is not None:
+        return sent
     _, chat_id = _get_credentials()
     try:
         response = requests.post(

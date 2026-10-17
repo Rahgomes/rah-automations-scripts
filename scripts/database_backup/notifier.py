@@ -89,4 +89,5 @@ def notify_summary(
         for db in orphaned:
             lines.append(f"• <code>{db}</code>")
 
-    telegram.send_text_message("\n".join(lines))
+    level = "info" if not failures else ("crit" if not successes else "warn")
+    telegram.send_text_message("\n".join(lines), level=level)
