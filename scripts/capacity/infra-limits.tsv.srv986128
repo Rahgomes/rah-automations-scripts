@@ -29,7 +29,7 @@ rah-crm-api                768M      1
 rah-crm-web                384M      1
 rah-crm-worker             384M      0.5
 rah-assistente             384M      0.5
-devflash                   256M      0.5
+devflash                   512M      0.5
 video-tools                512M      1
 videoinsight               512M      1
 mba-rag                    512M      1
