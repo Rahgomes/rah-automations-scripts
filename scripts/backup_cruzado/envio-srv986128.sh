@@ -29,8 +29,21 @@ log "2/3 espelho dos baldes"
 mapfile -t BALDES < <(mc ls --json src/ | python3 -c 'import sys,json;[print(json.loads(l)["key"].rstrip("/")) for l in sys.stdin]')
 for b in "${BALDES[@]}"; do
   [[ "$EXCLUIR" == *" $b "* ]] && continue
-  if ! mc mirror -q --overwrite --remove --limit-upload 40MiB "src/$b" "dst/copia-srv986128/$b" >/dev/null 2>"$TMP/err"; then
-    falhas+=("$b: $(tail -c 200 "$TMP/err")"); continue; fi
+  # O espelho direto entre os dois MinIO corta arquivos acima de 16 MiB (envio em partes pela VPN lenta).
+  # Ele cuida do pequeno e das remoções; o que ficar faltando ou diferente vai em 2 etapas (baixa e envia).
+  mc mirror -q --overwrite --remove "src/$b" "dst/copia-srv986128/$b" >/dev/null 2>&1 || true
+  while IFS= read -r chave; do
+    [ -n "$chave" ] || continue
+    if ! { mc cp -q "src/$b/$chave" "$TMP/obj" >/dev/null && mc cp -q "$TMP/obj" "dst/copia-srv986128/$b/$chave" >/dev/null; }; then
+      falhas+=("$b/$chave"); fi
+    rm -f "$TMP/obj"
+  done < <(mc diff --json "src/$b" "dst/copia-srv986128/$b" 2>/dev/null | python3 -c '
+import sys, json
+for l in sys.stdin:
+    d = json.loads(l)
+    if d.get("diff") in (1, 4, 5):  # 1 tamanho, 4 tipo, 5 só na origem (6 = só na cópia: o espelho remove)
+        print(d["first"].split("/", 4)[4] if d["first"].count("/") >= 4 else "")
+')
 done
 
 log "3/3 conferência"

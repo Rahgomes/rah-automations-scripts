@@ -3,4 +3,4 @@ Description=Backup cruzado srv986128 -> Contabo (config cifrada + espelho do Min
 After=network-online.target wg-quick@wg0.service
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/heavy -l backup-cruzado -k manutencao -c 50 -m 512M -t 90 -- /usr/local/lib/backup-cruzado/envio-srv986128.sh
+ExecStart=/usr/local/bin/heavy -l backup-cruzado -k manutencao -c 50 -m 512M -t 240 -- /usr/local/lib/backup-cruzado/envio-srv986128.sh

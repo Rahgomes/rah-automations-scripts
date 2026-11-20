@@ -13,6 +13,7 @@ Cada servidor guarda uma cópia do outro, pela VPN (WireGuard 10.66.0.0/24). Cri
 - **Acesso mínimo:** cada lado grava só no próprio balde de cópia (`contabo-backup-writer`, `srv986128-backup-writer`). O leitor do srv986128 (`backup-cruzado-leitor`) só lê.
 - **Aviso:** o Telegram só manda mensagem em falha. O carimbo em `/var/lib/rah-status/backup-*.txt` aparece no retrato que o Rah lê ("backup X: ok há Nh", FALHOU ou ATRASADO acima de 26 h).
 - **Conferência:** depois do espelho, compara a quantidade de objetos de cada balde entre origem e cópia.
+- **Arquivo grande pela VPN:** o `mc mirror` direto entre servidores quebra no envio em partes acima de 16 MiB (`ContentLength=16777216 with Body length ...`). O script espelha primeiro e, para o que ficou faltando ou diferente (`mc diff`), copia em dois passos: baixa para um temporário e sobe. A primeira cópia completa levou 71 min (o dump congelado do crawler tem ~7 GiB a ~1,7 MiB/s); nos dias seguintes só vão os arquivos novos. Teto no heavy: 240 min.
 
 ## Restaurar
 
