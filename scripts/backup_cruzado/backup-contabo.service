@@ -1,0 +1,11 @@
+[Unit]
+Description=Backup da Contabo (Postgres, pasta do Rah, config) com cópia no srv986128
+After=network-online.target docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/backup-cruzado/backup-contabo.sh
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=100%
+MemoryMax=1G
+TimeoutStartSec=90min

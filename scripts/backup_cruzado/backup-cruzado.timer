@@ -1,0 +1,8 @@
+[Unit]
+Description=Backup cruzado srv986128 -> Contabo, 04:30 (depois do dump das 03:00)
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=5min
+Persistent=true
+[Install]
+WantedBy=timers.target
