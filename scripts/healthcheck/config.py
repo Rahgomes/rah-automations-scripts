@@ -64,12 +64,6 @@ SERVICES: list[Service] = [
         container="docker-registry-ui",
         strategy=RecoveryStrategy.RESTART,
     ),
-    Service(
-        name="Keycloak",
-        url="https://sso.nexalumedigital.com.br/",
-        container="keycloak",
-        strategy=RecoveryStrategy.RESTART,
-    ),
     # --- Automacao ---
     Service(
         name="n8n",
@@ -84,24 +78,6 @@ SERVICES: list[Service] = [
         container="sitecloner",
         strategy=RecoveryStrategy.RESTART,
     ),
-    Service(
-        name="NexaLume DEV",
-        url="https://dev.nexalumedigital.com.br/",
-        container="nexalume-dev",
-        strategy=RecoveryStrategy.RESTART,
-    ),
-    Service(
-        name="NexaLume PROD",
-        url="https://nexalumedigital.com.br/",
-        container="nexalume-prod",
-        strategy=RecoveryStrategy.RESTART,
-    ),
-    Service(
-        name="MBA-RAG",
-        url="https://mba-rag.ramongomessilva.com.br/",
-        container="mba-rag",
-        strategy=RecoveryStrategy.RESTART,
-    ),
     # VideoInsight: Streamlit app responde internamente (localhost:8501) mas
     # Traefik nao roteia corretamente (WebSocket). Fix de infra pendente.
     # Service(
@@ -114,18 +90,6 @@ SERVICES: list[Service] = [
         name="Video Tools",
         url="https://video-tools.ramongomessilva.com.br/",
         container="video-tools",
-        strategy=RecoveryStrategy.RESTART,
-    ),
-    Service(
-        name="RAG NexaLume API",
-        url="https://rag-site.nexalumedigital.com.br/health",
-        container="rag-nexalume-api",
-        strategy=RecoveryStrategy.RESTART,
-    ),
-    Service(
-        name="Rah Memory Bot",
-        url="https://rah-memory-bot.ramongomessilva.com.br/health",
-        container="rah-memory-bot",
         strategy=RecoveryStrategy.RESTART,
     ),
 ]
