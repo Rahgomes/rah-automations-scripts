@@ -26,6 +26,26 @@ for db in "${DBS[@]}"; do
 done
 resumo+=("bancos ${#DBS[@]}")
 
+# Apps com banco próprio, fora do postgres-central (migrados do srv986128 em 21/11/2026).
+# Os anexos do Planka podem ter arquivo de cliente, então vão cifrados.
+KIMAI_DB=mysql-mv0s8b1r4ub1nvbby96qm9v6; PLANKA_DB=postgres-lfhc8uf0up6w7fu9ch4w3e0r
+if docker inspect "$KIMAI_DB" >/dev/null 2>&1; then
+  if docker exec "$KIMAI_DB" sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --databases "$MYSQL_DATABASE"' 2>/dev/null \
+      | gzip > "$TMP/kimai.sql.gz" && [ "$(zcat "$TMP/kimai.sql.gz" | head -c 100 | wc -c)" -gt 0 ]; then
+    mc cp -q "$TMP/kimai.sql.gz" "loc/backups/apps/kimai-mysql/$HOJE.sql.gz" >/dev/null; resumo+=("kimai")
+  else falhas+=("mysqldump kimai"); fi
+fi
+if docker inspect "$PLANKA_DB" >/dev/null 2>&1; then
+  if docker exec "$PLANKA_DB" pg_dump -U postgres -Fc -d planka > "$TMP/planka.dump" && [ -s "$TMP/planka.dump" ]; then
+    mc cp -q "$TMP/planka.dump" "loc/backups/apps/planka-postgres/$HOJE.dump" >/dev/null; resumo+=("planka")
+  else falhas+=("pg_dump planka"); fi
+  V=/var/lib/docker/volumes/lfhc8uf0up6w7fu9ch4w3e0r_planka-data/_data
+  if [ -d "$V" ]; then
+    tar_vivo -C "$V" -czf - . | age -r "$BACKUP_AGE_PUBLIC_KEY" -o "$TMP/planka-anexos.tar.gz.age"
+    mc cp -q "$TMP/planka-anexos.tar.gz.age" "loc/backups/apps/planka-anexos/$HOJE.tar.gz.age" >/dev/null
+  fi
+fi
+
 log "2/4 pasta do Rah"
 H=/home/hermes/.hermes; mkdir -p "$TMP/hermes-sqlite"
 for f in "$H"/*.db; do [ -f "$f" ] || continue
