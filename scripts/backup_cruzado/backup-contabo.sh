@@ -50,7 +50,7 @@ log "2/4 pasta do Rah"
 H=/home/hermes/.hermes; mkdir -p "$TMP/hermes-sqlite"
 for f in "$H"/*.db; do [ -f "$f" ] || continue
   python3 -c 'import sqlite3,sys; s=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()' "$f" "$TMP/hermes-sqlite/$(basename "$f")"; done
-tar_vivo -C / -czf - --exclude='home/hermes/.hermes/bin' --exclude='home/hermes/.hermes/logs' --exclude='home/hermes/.hermes/*.db' \
+tar_vivo -C / -czf - --exclude='home/hermes/.hermes/bin' --exclude='home/hermes/.hermes/node' --exclude='home/hermes/.hermes/logs' --exclude='home/hermes/.hermes/*.db' \
   --exclude='home/hermes/.hermes/*.db-wal' --exclude='home/hermes/.hermes/*.db-shm' --exclude='home/hermes/.hermes/models_dev_cache.json' \
   --exclude='*/__pycache__' --exclude='home/hermes/.hermes/cache' home/hermes/.hermes home/hermes/.ssh -C "$TMP" hermes-sqlite 2>/dev/null \
   | age -r "$BACKUP_AGE_PUBLIC_KEY" -o "$TMP/hermes.tar.gz.age"
