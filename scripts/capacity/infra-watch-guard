@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# infra-watch-guard: vigia do vigia (24/11/2026). Roda a cada 10 min pelo systemd.
+# O infra-watch para o próprio timer depois de MAX_FAILS falhas seguidas; em 23/11
+# isso deixou o srv986128 14 h sem alerta e sem dado de capacidade, com um único aviso.
+# Aqui: batimento parado há mais de STALE_MIN avisa (crítico) e repete a cada REPEAT_MIN
+# até o vigia voltar. Não religa sozinho: parada com orçamento folgado é defeito a olhar.
+set -uo pipefail
+STATE_DIR=${STATE_DIR:-/var/lib/infra-watch}
+STALE_MIN=${STALE_MIN:-10}
+REPEAT_MIN=${REPEAT_MIN:-60}
+NOW=$(date +%s)
+beat=$(grep -o '"ultimo_ok":[0-9]*' "$STATE_DIR/heartbeat.json" 2>/dev/null | cut -d: -f2)
+beat=${beat:-0}
+age=$(( (NOW - beat) / 60 ))
+last="$STATE_DIR/guard_last"
+if [ "$age" -lt "$STALE_MIN" ]; then
+  if [ -f "$last" ]; then
+    notify -n info -o infra-watch -t "vigia de volta" "infra-watch voltou a rodar em $(hostname)." || true
+    rm -f "$last"
+  fi
+  exit 0
+fi
+[ $(( NOW - $(cat "$last" 2>/dev/null || echo 0) )) -lt $(( REPEAT_MIN * 60 )) ] && exit 0
+echo "$NOW" > "$last"
+timer=$(systemctl is-active infra-watch.timer 2>/dev/null)
+why=$(grep ' fail ' "$STATE_DIR/watch.log" 2>/dev/null | tail -n 1 | cut -c1-160)
+msg="infra-watch sem batimento há ${age} min em $(hostname) (timer: ${timer}). Sem ele não há alerta de CPU/RAM/disco nem dado de capacidade no CRM."
+[ -n "$why" ] && msg+=" Última falha: ${why}."
+msg+=" Religar: systemctl start infra-watch.timer"
+notify -n crit -o infra-watch -t "vigia parado" "$msg" || true

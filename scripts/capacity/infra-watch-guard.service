@@ -1,0 +1,7 @@
+[Unit]
+Description=infra-watch-guard: avisa se o vigia de capacidade parou
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/infra-watch-guard
+Nice=10

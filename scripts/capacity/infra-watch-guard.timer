@@ -1,0 +1,10 @@
+[Unit]
+Description=infra-watch-guard a cada 10 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

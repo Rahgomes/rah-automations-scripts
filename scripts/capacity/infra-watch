@@ -23,7 +23,12 @@ DISK_WARN=${DISK_WARN:-70}; DISK_CRIT=${DISK_CRIT:-85}
 # Orçamento de CPU do próprio vigia por rodada (não conta a fotografia).
 # Medido em tempo de CPU, não de relógio: sob teto do provedor o relógio
 # estica, e o vigia não pode se desligar justo quando é mais necessário.
-BUDGET_MS=${BUDGET_MS:-200}
+# 1000 ms (24/11/2026): o custo da rodada sobe com a carga da máquina (cada
+# subshell custa mais com CPU disputada). Com 200 ms o vigia se desligou em
+# 19/11 e 23/11 ao passar 10 ms do limite, nas horas de mais build. Pior caso
+# medido em 4 dias de carga alta: 580 ms (~1% de 1 vCPU). O orçamento existe
+# para pegar o vigia descontrolado, não a carga do servidor.
+BUDGET_MS=${BUDGET_MS:-1000}
 # Containers unhealthy: checa a cada HEALTH_EVERY s e alerta após HEALTH_MIN min.
 # O Docker reinicia container que morre, mas não o que fica unhealthy (o
 # Planka ficou 19 h assim depois do reboot de 09/10).
@@ -32,8 +37,15 @@ HEALTH_EVERY=${HEALTH_EVERY:-300}; HEALTH_MIN=${HEALTH_MIN:-10}
 MAX_FAILS=${MAX_FAILS:-3}
 
 mkdir -p "$STATE_DIR"
-NOW=$(date +%s)
-T0=$(date +%s%N)
+# Sem subprocesso até o orçamento: cada fork custa mais com a máquina disputada (e 2,6x
+# na Contabo), e era isso que fazia a rodada passar do orçamento nas horas de carga.
+NOW=$EPOCHSECONDS
+T0=${EPOCHREALTIME//[!0-9]/}  # microssegundos
+readf() { # $1 = variável, $2 = arquivo, $3 = padrão; lê a 1ª linha sem subprocesso
+  local -n _out=$1; _out=$3
+  [ -r "$2" ] && { IFS= read -r _out < "$2" || true; } && [ -z "$_out" ] && _out=$3
+  return 0
+}
 
 notify() { # $1 = texto, $2 = nível (info|warn|crit; padrão warn)
   # Com o comando `notify` instalado, o aviso vai por ele: mesmo Telegram e fica registrado
@@ -65,12 +77,13 @@ fail() { # $1 = motivo. Backoff 1/5/15 min; na falha MAX_FAILS para o timer.
 }
 
 # Backoff ativo: pula a rodada sem contar como falha.
-[ "$NOW" -lt "$(cat "$STATE_DIR/next_run" 2>/dev/null || echo 0)" ] && exit 0
+readf next_run "$STATE_DIR/next_run" 0
+[ "$NOW" -lt "$next_run" ] && exit 0
 
 # --- CPU e steal: delta do /proc/stat contra a rodada anterior ---
 read -r _ u n s i w irq sirq st _ < /proc/stat || fail "leitura de /proc/stat"
 cur="$u $n $s $i $w $irq $sirq $st"
-prev=$(cat "$STATE_DIR/cpu_prev" 2>/dev/null)
+readf prev "$STATE_DIR/cpu_prev" ""
 echo "$cur" > "$STATE_DIR/cpu_prev"
 [ -z "$prev" ] && exit 0   # primeira rodada: só grava a base
 read -r pu pn ps pi pw pirq psirq pst <<< "$prev"
@@ -98,34 +111,46 @@ read -r load1 _ _ runq _ < /proc/loadavg; runq=${runq%%/*}
 
 # --- Janela móvel (últimos 15 min) para média de CPU e steal ---
 hist="$STATE_DIR/window"
-{ tail -n 14 "$hist" 2>/dev/null; echo "$cpu $steal $mem_avail"; } > "$hist.tmp" && mv "$hist.tmp" "$hist"
-avg() { # $1 = coluna, $2 = últimos N minutos
-  tail -n "$2" "$hist" | awk -v c="$1" -v n="$2" '{s+=$c; k++} END{ if (k<n) print -1; else printf "%d", s/k }'
+H=(); [ -r "$hist" ] && mapfile -t H < "$hist"
+H+=("$cpu $steal $mem_avail")
+[ "${#H[@]}" -gt 15 ] && H=("${H[@]: -15}")
+printf '%s\n' "${H[@]}" > "$hist.tmp" && mv "$hist.tmp" "$hist"
+avg() { # $1 = variável, $2 = coluna (0, 1, 2), $3 = últimos N minutos; -1 sem N minutos
+  local -n _r=$1; local k=${#H[@]} s=0 i c
+  if [ "$k" -lt "$3" ]; then _r=-1; return; fi
+  for (( i = k - $3; i < k; i++ )); do read -r -a c <<< "${H[i]}"; s=$(( s + c[$2] )); done
+  _r=$(( s / $3 ))
 }
-cpu_w=$(avg 1 "$CPU_WARN_MIN"); cpu_c=$(avg 1 "$CPU_CRIT_MIN"); steal_a=$(avg 2 "$STEAL_MIN")
-mem_max=$(tail -n "$MEM_MIN" "$hist" | awk '{ if ($3>m) m=$3 } END{print m+0}')  # pior caso = maior disponível na janela
+avg cpu_w 0 "$CPU_WARN_MIN"; avg cpu_c 0 "$CPU_CRIT_MIN"; avg steal_a 1 "$STEAL_MIN"
+mem_max=0; mem_n=0  # pior caso = maior disponível na janela
+for (( i = ${#H[@]} - MEM_MIN; i < ${#H[@]}; i++ )); do
+  [ "$i" -lt 0 ] && continue
+  read -r -a c <<< "${H[i]}"; mem_n=$(( mem_n + 1 )); [ "${c[2]}" -gt "$mem_max" ] && mem_max=${c[2]}
+done
 
 # --- Estado de cada sinal: ok / warn / crit ---
-level() { # $1 = valor, $2 = warn, $3 = crit (crit vazio = sem crit); maior é pior
-  if [ "$1" -lt 0 ]; then echo ok
-  elif [ -n "$3" ] && [ "$1" -ge "$3" ]; then echo crit
-  elif [ "$1" -ge "$2" ]; then echo warn
-  else echo ok; fi
+level() { # $1 = variável, $2 = valor, $3 = warn, $4 = crit (vazio = sem crit); maior é pior
+  local -n _l=$1
+  if [ "$2" -lt 0 ]; then _l=ok
+  elif [ -n "$4" ] && [ "$2" -ge "$4" ]; then _l=crit
+  elif [ "$2" -ge "$3" ]; then _l=warn
+  else _l=ok; fi
 }
 declare -A now_state msg
-now_state[cpu]=$( [ "$(level "$cpu_c" 999 "$CPU_CRIT")" = crit ] && echo crit || level "$cpu_w" "$CPU_WARN" "" )
+level lv_c "$cpu_c" 999 "$CPU_CRIT"; level lv_w "$cpu_w" "$CPU_WARN" ""
+now_state[cpu]=$lv_w; [ "$lv_c" = crit ] && now_state[cpu]=crit
 msg[cpu]="CPU média ${cpu_w}% (15 min), ${cpu_c}% (5 min)"
-now_state[steal]=$(level "$steal_a" "$STEAL_WARN" "")
+level lv "$steal_a" "$STEAL_WARN" ""; now_state[steal]=$lv
 msg[steal]="steal médio ${steal_a}% em ${STEAL_MIN} min: provável teto do provedor"
 # RAM: menor é pior; usa o maior disponível da janela para exigir MEM_MIN minutos seguidos.
 now_state[mem]=ok
-[ "$(tail -n "$MEM_MIN" "$hist" | wc -l)" -ge "$MEM_MIN" ] && {
+[ "$mem_n" -ge "$MEM_MIN" ] && {
   if [ "$mem_max" -lt "$MEM_AVAIL_CRIT" ]; then now_state[mem]=crit
   elif [ "$mem_max" -lt "$MEM_AVAIL_WARN" ]; then now_state[mem]=warn; fi; }
 msg[mem]="RAM disponível ${mem_avail}%"
-now_state[swap]=$(level "$swap_used" "$SWAP_WARN" "")
+level lv "$swap_used" "$SWAP_WARN" ""; now_state[swap]=$lv
 msg[swap]="swap em uso ${swap_used}%"
-now_state[disk]=$(level "$disk" "$DISK_WARN" "$DISK_CRIT")
+level lv "$disk" "$DISK_WARN" "$DISK_CRIT"; now_state[disk]=$lv
 msg[disk]="disco ${disk_path} em ${disk}%"
 
 # CPU gasta pelo vigia até aqui (shell + filhos), antes de alerta e fotografia.
@@ -184,7 +209,7 @@ mfile="$STATE_DIR/metrics-$day.csv"
   echo "ts,cpu,steal,iowait,load1,runq,mem_avail,swap_used,disk,watch_ms,watch_cpu_ms" > "$mfile"
   find "$STATE_DIR" -name 'metrics-*.csv' -mtime +"$RETENTION_DAYS" -delete
 }
-ms=$(( ($(date +%s%N) - T0) / 1000000 ))
+ms=$(( (${EPOCHREALTIME//[!0-9]/} - T0) / 1000 ))
 echo "$NOW,$cpu,$steal,$iow,$load1,$runq,$mem_avail,$swap_used,$disk,$ms,$WATCH_CPU_MS" >> "$mfile"
 
 # --- Batimento e orçamento do próprio vigia ---
